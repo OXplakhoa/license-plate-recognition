@@ -1,0 +1,9 @@
+# Ground Truth - Biển Số Xe Expected
+# Format: image_filename => expected_plate_number
+
+# Ví dụ format biển số Việt Nam: 12A-345.67
+# 12 = Mã tỉnh thành, A = Ký tự serial, 345.67 = Số đăng ký
+
+# Thêm các biển số test của bạn ở đây
+# sample_car_01.jpg => 51B-001.23
+# sample_car_02.jpg => 29A-123.45

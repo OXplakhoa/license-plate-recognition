@@ -1,0 +1,30 @@
+### Đề tài
+Nhận dạng biển số xe
+
+### Yêu cầu
+- Ứng dụng các kỹ thuật xử lý ảnh số và nhận dạng ký tự (OCR) để trích xuát thông tin biển số
+- Xây dựng chương trình phát hiện, tách và nhận dạng biển số xe từ ảnh chụp thực tế
+- Không sử dụng CNN hoặc các mô hình học sâu phức tạp, chỉ sử dụng các phương pháp truyền thống
+
+### Nội dung thực hiện
+1. Nhập ảnh đầu vào:
+- Ảnh chụp xe ô tô hoặc xe máy trong điều kiện thực tế (ngoài trời, ánh sáng khác nhau)
+- Hỗ trợ đọc ảnh .jpg, .png, hoặc từ camera trực tiếp
+2. Tiền xử lý ảnh (Preprocessing):
+- Chuyển ảnh sang thang xám (grayscale)
+- Lọc nhiễu (Gaussian blur, Median filter)
+- Cân bằng độ tương phản (Histogram Equalization hoặc CLAHE)
+3. Phát hiện vùng biển số (License Plate Detection):
+- Sử dụng phát hiện biên (Canny, Sobel) kết hợp phép morphology (đóng, mở)
+- Xác định contour có tỉ lệ khung phù hợp (tỉ lệ ~ 4:1 hoặc 5:1)
+- Cắt vùng chứa biển số từ ảnh gốc
+4. Chuẩn hóa và phân tách ký tự (Segmentation):
+- Chuyển biển số sang nhị phân (Otsu Threshold)
+- Tách từng ký tự dựa trên khoảng cách pixel hoặc contour
+- Căn chỉnh và resize mỗi ký tự về cùng kích thước (ví dụ 28x28)
+5. Nhận dạng ký tự (Character Recognition):
+- Dùng mô hình OCR (Tesseract) để nhận dạng từng ký tự
+- Kết hợp lại thành chuỗi biển số hoàn chỉnh
+6. Hiển thị và đánh giá kết quả:
+- Hiển thị ảnh gốc, vùng biển số đã phát hiện và kết quả nhận dạng
+- So sánh với biển số thật (nếu có ground truth)
