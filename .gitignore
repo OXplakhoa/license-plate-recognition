@@ -22,7 +22,7 @@ wheels/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+# *.ipynb
 
 # IDE
 .vscode/
@@ -42,7 +42,7 @@ Thumbs.db
 *.log
 
 # Project specific
-*.jpg
+# *.jpg
 *.png
 *.jpeg
 output/
