@@ -25,9 +25,13 @@ import matplotlib.gridspec as gridspec
 from src.lp_detector import (
     detect_with_character_validation,
     correct_plate_perspective_and_skew,
+    detect_white_plate_regions,
+    detect_with_mser,
+    get_plate_type_from_aspect,
 )
 from src.character_segmenter import segment_characters, binarize_plate
 from src.utils import ensure_grayscale
+from src.heuristics import apply_heuristics
 
 
 def create_detailed_visualization(image_path: str, output_path: str = None, ocr_engine: str = "easyocr"):
@@ -147,16 +151,64 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     
     print(f"  → Contour phù hợp tỷ lệ biển số: {len(plate_candidates)}")
     
-    # 3.6 Detection với Character Validation
+    # 3.6 Detection với Character Validation (với auto-retry như pipeline chính)
     print("\n📍 Bước 3.6: Detection với Character Validation")
-    detections, det_info = detect_with_character_validation(gray, min_char_score=0.35, debug=True)
+    
+    # First try: Standard detection
+    detections, det_info = detect_with_character_validation(
+        gray, 
+        bgr_image=img_bgr,
+        min_char_score=0.35, 
+        debug=True
+    )
+    valid_detections = [d for d in detections if d.get("char_valid", False)]
+    detection_method = "contour+edge"
+    
+    # Luôn thử thêm color + MSER để có nhiều candidates hơn
+    print("  → Thử thêm Color + MSER detection...")
+    color_detections, color_info = detect_with_character_validation(
+        gray,
+        bgr_image=img_bgr,
+        min_char_score=0.25,  # Lower threshold
+        use_color=True,
+        use_mser=True,
+        debug=True
+    )
+    
+    # Merge detections, prioritize by char_score
+    all_detections = detections + [d for d in color_detections if d.get("char_valid", False)]
+    
+    # Remove duplicates (same box)
+    seen_boxes = set()
+    unique_detections = []
+    for d in all_detections:
+        box_key = tuple(d['box'])
+        if box_key not in seen_boxes:
+            seen_boxes.add(box_key)
+            unique_detections.append(d)
+    
+    # Sort by char_score
+    unique_detections.sort(key=lambda d: d.get('char_score', 0), reverse=True)
+    detections = unique_detections
+    
+    # Determine which method found the best detection
+    if detections:
+        best_source = detections[0].get('source', detections[0].get('method', 'unknown'))
+        if best_source in ['color', 'mser']:
+            detection_method = f"color+mser ({best_source})"
+        else:
+            detection_method = "contour+edge"
+    
     print(f"  → Số vùng phát hiện: {len(detections)}")
+    print(f"  → Phương pháp tốt nhất: {detection_method}")
     
     if detections:
         best_det = detections[0]
         x, y, w, h = best_det['box']
+        source = best_det.get('source', best_det.get('method', 'unknown'))
         print(f"  → Vùng tốt nhất: ({x}, {y}) - {w}x{h}")
         print(f"  → Điểm char_score: {best_det.get('char_score', 0):.2f}")
+        print(f"  → Nguồn: {source}")
     
     # Extract ROI
     roi_gray = None
@@ -167,7 +219,6 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
         ar = w / h
         area = w * h
         # Use improved classification with size
-        from src.lp_detector import get_plate_type_from_aspect
         plate_type = get_plate_type_from_aspect(ar, w, h)
         print(f"  → Loại biển số: {plate_type} (AR={ar:.2f}, Size={w}x{h}, Area={area})")
     
@@ -337,16 +388,17 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     print("BƯỚC 6: HIỂN THỊ VÀ ĐÁNH GIÁ KẾT QUẢ")
     print("=" * 70)
     
-    # Post-processing
-    from src.ocr_engine import smart_correct_plate, format_plate_display, validate_vn_plate_format
+    # Post-processing - sử dụng heuristics mới (bao gồm province code fix)
+    from src.ocr_engine import format_plate_display, validate_vn_plate_format
     
-    corrected_text, corr_conf = smart_correct_plate(ocr_text)
+    # Apply heuristics (đã import ở đầu file)
+    corrected_text = apply_heuristics(ocr_text)
     formatted_text = format_plate_display(corrected_text)
     is_valid = validate_vn_plate_format(corrected_text)
     
     print(f"\n📍 Hậu xử lý:")
     print(f"  → Text gốc: {ocr_text}")
-    print(f"  → Sau correction: {corrected_text}")
+    print(f"  → Sau heuristics: {corrected_text}")
     print(f"  → Formatted: {formatted_text}")
     print(f"  → Valid format: {'✓ Có' if is_valid else '✗ Không'}")
     
