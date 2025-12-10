@@ -1,59 +1,51 @@
-"""
-Main entry point for License Plate Recognition system
-Usage: python main.py --image <image_path> [--output <output_path>]
-"""
+"""CLI entry for Vietnamese License Plate Recognition."""
 
 import argparse
-import sys
 from pathlib import Path
 
-def main():
+import cv2
+
+from src.pipeline import run_pipeline, draw_result
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description='Vietnamese License Plate Recognition - Traditional Image Processing'
+        description="Vietnamese License Plate Recognition - Traditional Image Processing",
     )
+    parser.add_argument("--image", type=str, help="Path to input image (jpg, png)")
+    parser.add_argument("--output", type=str, help="Path to save output image", required=False)
     parser.add_argument(
-        '--image',
+        "--plate-type",
         type=str,
-        help='Path to input image (jpg, png)',
-        required=False
+        choices=["auto", "car2", "car1", "bike"],
+        default="auto",
+        help="Plate layout: auto (try car2, car1, bike) or force a specific type",
     )
-    parser.add_argument(
-        '--output',
-        type=str,
-        help='Path to save output image with detected plate',
-        required=False
-    )
-    parser.add_argument(
-        '--camera',
-        action='store_true',
-        help='Use camera as input (requires cv2)',
-        default=False
-    )
-    
-    args = parser.parse_args()
-    
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    if not args.image:
+        raise SystemExit("Please provide --image <path>")
+
     print("License Plate Recognition System")
     print("=" * 50)
-    print("\nSetup hoàn tất! Tiếp theo:")
-    print("1. Cài đặt dependencies: pip install -r requirements.txt")
-    print("2. Tạo Jupyter Notebook: jupyter notebook")
-    print("3. Bắt đầu phát triển pipeline trong notebooks/")
-    print("\nCác bước thực hiện:")
-    print("  - Nhập ảnh")
-    print("  - Tiền xử lý ảnh")
-    print("  - Phát hiện vùng biển số")
-    print("  - Phân tách ký tự")
-    print("  - Nhận dạng với Tesseract")
-    print("  - Hiển thị kết quả")
-    
-    if args.image:
-        print(f"\n[TODO] Xử lý ảnh: {args.image}")
-    elif args.camera:
-        print("\n[TODO] Bắt đầu từ camera...")
+
+    result = run_pipeline(args.image, plate_type=args.plate_type)
+
+    if not result.bbox:
+        print("No plate detected.")
     else:
-        print("\nKhông có input. Sử dụng:")
-        print("  python main.py --image <path/to/image>")
-        print("  python main.py --camera")
+        print(f"Detected plate: {result.text} (mode={result.mode}, conf={result.confidence:.1f}, chars={result.seg_count})")
+
+    if args.output and result.bbox:
+        img = cv2.imread(args.image)
+        vis = draw_result(img, result)
+        cv2.imwrite(args.output, vis)
+        print(f"Saved visualization to {args.output}")
+
 
 if __name__ == "__main__":
     main()

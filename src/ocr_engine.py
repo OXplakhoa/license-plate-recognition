@@ -65,6 +65,20 @@ def _ocr_image(
         return text, None
 
 
+def resize_for_ocr(img: np.ndarray, target_height: int = 50) -> np.ndarray:
+    """Resize image to optimal height for Tesseract OCR."""
+    h, w = img.shape[:2]
+    if h == 0:
+        return img
+    
+    scale = target_height / h
+    new_w = int(w * scale)
+    
+    if new_w > 0 and target_height > 0:
+        return cv2.resize(img, (new_w, target_height), interpolation=cv2.INTER_CUBIC)
+    return img
+
+
 def ocr_single_char(
     char_img: np.ndarray,
     whitelist: Optional[str] = None,
@@ -75,8 +89,11 @@ def ocr_single_char(
     Uses PSM 10 (single char) for best accuracy. Returns (char, conf).
     """
     configure_tesseract()
-    pre = binarize_for_ocr(char_img)
-    pre = pad_image(pre, 8)
+    
+    # Resize to optimal size for character OCR
+    resized = resize_for_ocr(char_img, target_height=40)
+    pre = binarize_for_ocr(resized)
+    pre = pad_image(pre, 10)
     _, data = _ocr_image(pre, psm=10, whitelist=whitelist, lang=lang, return_data=True)
 
     # Find the highest-confidence non-empty symbol
@@ -107,6 +124,7 @@ def ocr_characters(
     char_images: Sequence[np.ndarray],
     vn_plate: bool = True,
     lang: str = "eng",
+    plate_type: str | None = None,
 ) -> OCRResult:
     """OCR a list of segmented character images and join them into a string.
 
@@ -122,7 +140,7 @@ def ocr_characters(
             chars.append(ch)
             confs.append(cf)
     raw = "".join(chars)
-    corrected = correct_plate_by_pattern(raw)
+    corrected = correct_plate_by_pattern(raw, plate_type=plate_type)
     return OCRResult(corrected, confs)
 
 
@@ -131,23 +149,81 @@ def ocr_plate_line(
     vn_plate: bool = True,
     lang: str = "eng",
     psm: int = 7,
+    plate_type: str | None = None,
 ) -> OCRResult:
     """OCR an entire plate line using a textline PSM.
 
     Useful when segmentation is not available.
     """
     configure_tesseract()
-    pre = binarize_for_ocr(plate_img)
-    pre = pad_image(pre, 8)
+    
+    # Resize to optimal height
+    resized = resize_for_ocr(plate_img, target_height=50)
+    pre = binarize_for_ocr(resized)
+    pre = pad_image(pre, 12)
     whitelist = letter_digit_whitelist(vn_plate)
     text, data = _ocr_image(pre, psm=psm, whitelist=whitelist, lang=lang, return_data=True)
 
-    text = correct_plate_by_pattern(_normalize_plate(text))
+    text = correct_plate_by_pattern(_normalize_plate(text), plate_type=plate_type)
     confs: List[float] = []
     if data:
         # Gather word-level confidences
         confs = [float(c) for c in data.get("conf", []) if _is_valid_conf(c)]
     return OCRResult(text, confs)
+
+
+def ocr_plate_multi_psm(
+    plate_img: np.ndarray,
+    vn_plate: bool = True,
+    lang: str = "eng",
+    plate_type: str | None = None,
+) -> OCRResult:
+    """
+    OCR plate using multiple PSM modes and return best result.
+    
+    Tries PSM 6, 7, 11, 13 and picks result with highest confidence
+    or longest valid text.
+    """
+    configure_tesseract()
+    
+    # Resize to optimal height and preprocess
+    resized = resize_for_ocr(plate_img, target_height=50)
+    pre = binarize_for_ocr(resized)
+    pre = pad_image(pre, 12)
+    whitelist = letter_digit_whitelist(vn_plate)
+    
+    # Try multiple PSM modes
+    psm_modes = [6, 7, 11, 13]  # Block, single line, sparse, raw line
+    
+    best_result = None
+    best_score = -1
+    
+    for psm in psm_modes:
+        try:
+            text, data = _ocr_image(pre, psm=psm, whitelist=whitelist, lang=lang, return_data=True)
+            text = correct_plate_by_pattern(_normalize_plate(text), plate_type=plate_type)
+            
+            confs: List[float] = []
+            if data:
+                confs = [float(c) for c in data.get("conf", []) if _is_valid_conf(c)]
+            
+            # Score based on: text length * mean confidence
+            mean_conf = float(np.mean(confs)) if confs else 0
+            score = len(text) * mean_conf / 100.0
+            
+            # Bonus for reasonable plate length (7-8 chars)
+            if 7 <= len(text) <= 8:
+                score += 3
+            elif 5 <= len(text) <= 9:
+                score += 1
+            
+            if score > best_score:
+                best_score = score
+                best_result = OCRResult(text, confs)
+        except Exception:
+            continue
+    
+    return best_result if best_result else OCRResult("", [])
 
 
 def _is_valid_conf(c: object) -> bool:
@@ -176,12 +252,15 @@ def combine_lines(line1: str, line2: Optional[str] = None) -> str:
 def _closest_digit(ch: str) -> str:
     # Common OCR confusions for digits
     mapping = {
-        'O': '0', 'D': '0', 'Q': '0', 'o': '0',
-        'I': '1', 'l': '1', 'T': '1',
-        'Z': '2',
-        'S': '5',
-        'b': '6', 'G': '6',
-        'B': '8',
+        'O': '0', 'D': '0', 'Q': '0', 'o': '0', 'C': '0',
+        'I': '1', 'l': '1', 'T': '1', 'i': '1', 'J': '1',
+        'Z': '2', 'z': '2',
+        'E': '3',
+        'A': '4', 'H': '4',
+        'S': '5', 's': '5',
+        'b': '6', 'G': '6', 'g': '6',
+        'B': '8', 'R': '8',
+        'g': '9', 'q': '9',
     }
     return mapping.get(ch, ch) if ch.isalpha() else ch
 
@@ -189,39 +268,176 @@ def _closest_digit(ch: str) -> str:
 def _closest_letter(ch: str) -> str:
     # For the serial letter, prefer letters over digits; map obvious digit confusions
     mapping = {
-        '0': 'O', '1': 'T', '2': 'Z', '5': 'S', '6': 'G', '8': 'B'
+        '0': 'D', '1': 'T', '2': 'Z', '5': 'S', '6': 'G', '8': 'B', '9': 'G',
+        '4': 'A', '3': 'E',
     }
     return mapping.get(ch, ch)
 
 
-def correct_plate_by_pattern(text: str) -> str:
-    """Heuristically correct OCR output to match VN plate pattern: NN L DDDDD
+# Vietnamese province codes (first 2 digits)
+VN_PROVINCE_CODES = {
+    '11': 'Cao Bằng', '12': 'Lạng Sơn', '14': 'Quảng Ninh', '15': 'Hải Phòng',
+    '16': 'Hải Phòng', '17': 'Thái Bình', '18': 'Nam Định', '19': 'Phú Thọ',
+    '20': 'Thái Nguyên', '21': 'Yên Bái', '22': 'Tuyên Quang', '23': 'Hà Giang',
+    '24': 'Lào Cai', '25': 'Lai Châu', '26': 'Sơn La', '27': 'Điện Biên',
+    '28': 'Hoà Bình', '29': 'Hà Nội', '30': 'Hà Nội', '31': 'Hà Nội',
+    '32': 'Hà Nội', '33': 'Hà Nội', '34': 'Hải Dương', '35': 'Ninh Bình',
+    '36': 'Thanh Hoá', '37': 'Nghệ An', '38': 'Hà Tĩnh', '39': 'Đồng Nai',
+    '40': 'Hà Nội', '41': 'Hà Nội', '43': 'Đà Nẵng', '47': 'Đắk Lắk',
+    '48': 'Đắk Nông', '49': 'Lâm Đồng', '50': 'TP.HCM', '51': 'TP.HCM',
+    '52': 'TP.HCM', '53': 'TP.HCM', '54': 'TP.HCM', '55': 'TP.HCM',
+    '56': 'TP.HCM', '57': 'TP.HCM', '58': 'TP.HCM', '59': 'TP.HCM',
+    '60': 'Đồng Nai', '61': 'Bình Dương', '62': 'Long An', '63': 'Tiền Giang',
+    '64': 'Vĩnh Long', '65': 'Cần Thơ', '66': 'Đồng Tháp', '67': 'An Giang',
+    '68': 'Kiên Giang', '69': 'Cà Mau', '70': 'Tây Ninh', '71': 'Bến Tre',
+    '72': 'Bà Rịa - VT', '73': 'Quảng Bình', '74': 'Quảng Trị', '75': 'Huế',
+    '76': 'Quảng Ngãi', '77': 'Bình Định', '78': 'Phú Yên', '79': 'Khánh Hoà',
+    '81': 'Gia Lai', '82': 'Kon Tum', '83': 'Sóc Trăng', '84': 'Trà Vinh',
+    '85': 'Ninh Thuận', '86': 'Bình Thuận', '88': 'Vĩnh Phúc', '89': 'Hưng Yên',
+    '90': 'Hà Nam', '92': 'Quảng Nam', '93': 'Bình Phước', '94': 'Bạc Liêu',
+    '95': 'Hậu Giang', '97': 'Bắc Kạn', '98': 'Bắc Giang', '99': 'Bắc Ninh',
+}
 
-    - First two: digits
-    - Third: letter
-    - Rest: digits
-    Applies digit/letter lookalike normalization.
+# Valid serial letters (position 3)
+VN_SERIAL_LETTERS = set('ABCDEFGHKLMNPRSTUVXYZ')  # No I, O, Q, J, W
+
+
+def validate_vn_plate_format(text: str) -> Tuple[bool, str]:
+    """
+    Validate if text matches Vietnamese plate format.
+    
+    Format: NN-C-NNNNN or NNC-NNNNN (7-8 chars)
+    - NN: Province code (2 digits)
+    - C: Serial letter
+    - NNNNN: 4-5 digits
+    
+    Returns:
+        (is_valid, reason)
+    """
+    if len(text) < 7 or len(text) > 9:
+        return False, f"Length {len(text)} not in range [7,9]"
+    
+    # Check province code
+    province = text[:2]
+    if not province.isdigit():
+        return False, f"Province code '{province}' not digits"
+    if province not in VN_PROVINCE_CODES:
+        return False, f"Unknown province code '{province}'"
+    
+    # Check serial letter
+    if len(text) > 2:
+        serial = text[2]
+        if not serial.isalpha():
+            return False, f"Serial '{serial}' not letter"
+        if serial not in VN_SERIAL_LETTERS:
+            return False, f"Serial '{serial}' not valid VN letter"
+    
+    # Check remaining digits
+    remaining = text[3:]
+    if not remaining.isdigit():
+        return False, f"Remaining '{remaining}' not all digits"
+    
+    return True, "Valid"
+
+
+def correct_plate_by_pattern(text: str, plate_type: str | None = None) -> str:
+    """Normalize OCR output to common VN plate patterns.
+
+    Applies digit/letter lookalike normalization and trims to typical length
+    (7–8 chars). plate_type can be "car1", "car2", or "bike"; all share the
+    two-digit prefix + one letter convention.
     """
     t = list(_normalize_plate(text))
-    if len(t) < 7:
+    if len(t) < 3:
         return "".join(t)
+
     # positions 0,1 digits
     for pos in [0, 1]:
         if pos < len(t):
             t[pos] = _closest_digit(t[pos])
             if not t[pos].isdigit():
-                # if still not a digit, coerce to '0'
                 t[pos] = '0'
+
     # position 2 letter
     if 2 < len(t):
         c = _closest_letter(t[2])
-        # Avoid ambiguous letters and digits
         if c.isdigit() or c in {'I', 'O', 'Q'}:
             c = 'A'
         t[2] = c
+
     # remaining digits
     for pos in range(3, len(t)):
         t[pos] = _closest_digit(t[pos])
         if not t[pos].isdigit():
             t[pos] = '0'
-    return "".join(t)
+
+    normalized = "".join(t)
+    # Trim overly long strings to 8 characters (common for VN plates)
+    if len(normalized) > 8 and (plate_type in {"car1", "car2", "bike", None}):
+        normalized = normalized[:8]
+    return normalized
+
+
+def smart_correct_plate(text: str, plate_type: str | None = None) -> Tuple[str, float]:
+    """
+    Smart plate correction with confidence score.
+    
+    Uses province code validation and pattern matching for better accuracy.
+    
+    Args:
+        text: Raw OCR text
+        plate_type: Optional plate type hint
+        
+    Returns:
+        (corrected_text, confidence_score)
+    """
+    # First apply basic correction
+    corrected = correct_plate_by_pattern(text, plate_type=plate_type)
+    
+    # Validate format
+    is_valid, reason = validate_vn_plate_format(corrected)
+    
+    if is_valid:
+        return corrected, 1.0
+    
+    # Try to fix province code
+    if len(corrected) >= 2:
+        province = corrected[:2]
+        if province not in VN_PROVINCE_CODES:
+            # Try common corrections
+            corrections = {
+                '00': '50', '01': '51', '10': '10',
+                '0D': '50', '5D': '50', 'S0': '50',
+                'S1': '51', 'S2': '52', 'S9': '59',
+            }
+            if province in corrections:
+                corrected = corrections[province] + corrected[2:]
+    
+    # Re-validate
+    is_valid, _ = validate_vn_plate_format(corrected)
+    confidence = 0.8 if is_valid else 0.5
+    
+    return corrected, confidence
+
+
+def format_plate_display(text: str) -> str:
+    """
+    Format plate text for display with common VN separators.
+    
+    Input: "51F12345"
+    Output: "51F-123.45"
+    """
+    if len(text) < 7:
+        return text
+    
+    # Format: NN-C-NNN.NN
+    province = text[:2]
+    serial = text[2]
+    numbers = text[3:]
+    
+    if len(numbers) >= 5:
+        return f"{province}{serial}-{numbers[:3]}.{numbers[3:]}"
+    elif len(numbers) >= 3:
+        return f"{province}{serial}-{numbers}"
+    else:
+        return text

@@ -22,20 +22,28 @@ def ensure_grayscale(img: np.ndarray) -> np.ndarray:
     return gray
 
 
-def binarize_for_ocr(img: np.ndarray, invert_pref: bool = True) -> np.ndarray:
+def binarize_for_ocr(img: np.ndarray, invert_pref: bool = True, sharpen: bool = True) -> np.ndarray:
     """Binarize image for Tesseract: black text on white background.
 
     Steps:
     - grayscale
     - CLAHE for local contrast
+    - Sharpen (optional)
     - Otsu threshold
     - invert if text likely white on dark background
     """
     gray = ensure_grayscale(img)
 
     # Local contrast enhancement helps in varied lighting
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
+    
+    # Sharpen for better character edges
+    if sharpen:
+        kernel_sharpen = np.array([[-1, -1, -1],
+                                   [-1,  9, -1],
+                                   [-1, -1, -1]])
+        gray = cv2.filter2D(gray, -1, kernel_sharpen)
 
     # Otsu threshold
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -56,7 +64,7 @@ def binarize_for_ocr(img: np.ndarray, invert_pref: bool = True) -> np.ndarray:
     return th
 
 
-def pad_image(img: np.ndarray, pad: int = 6, value: int = 255) -> np.ndarray:
+def pad_image(img: np.ndarray, pad: int = 10, value: int = 255) -> np.ndarray:
     """Pad image with white border to give Tesseract context."""
     return cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=value)
 

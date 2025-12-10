@@ -46,7 +46,11 @@ jupyter notebook
 
 ### 3. Chạy
 ```bash
-python main.py --image data/test_images/sample.jpg
+# Thử tự động (car 2 dòng, car 1 dòng, bike)
+python main.py --image data/test_images/sample.jpg --plate-type auto
+
+# Ép kiểu biển (vd: biển chữ nhật 1 dòng)
+python main.py --image data/test_images/sample.jpg --plate-type car1
 ```
 
 ## 📁 Cấu Trúc Thư Mục
@@ -60,6 +64,8 @@ lp_recognition/
 │   ├── lp_detector.py                      # Phát hiện biển số
 │   ├── character_segmenter.py              # Phân tách ký tự
 │   ├── ocr_engine.py                       # Tesseract wrapper
+│   ├── preprocess.py                       # Tiền xử lý ảnh
+│   ├── pipeline.py                         # Chuỗi tiền xử lý → detect → segment → OCR
 │   └── utils.py                            # Các hàm tiện ích
 ├── tests/
 │   ├── test_detector.py
