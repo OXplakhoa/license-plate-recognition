@@ -29,6 +29,8 @@ def binarize_plate(
     plate_roi: np.ndarray, 
     method: str = "otsu",
     denoise: bool = True,
+    aggressive: bool = False,
+    light_preprocess: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Binarize plate image for character segmentation.
@@ -37,51 +39,78 @@ def binarize_plate(
         plate_roi: Input plate ROI (grayscale or BGR)
         method: "otsu", "adaptive", or "combined"
         denoise: Apply denoising before binarization
+        aggressive: If True, apply stronger morphology (may lose detail)
+        light_preprocess: If True, use minimal preprocessing to preserve edge characters
         
     Returns:
         (binary, inverted_binary) tuple
     """
     gray = ensure_grayscale(plate_roi)
     
-    # Apply CLAHE for contrast enhancement - increased clipLimit for better contrast
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
-    
-    # Optional denoising for corrected plates (may have interpolation artifacts)
-    if denoise:
-        denoised = cv2.fastNlMeansDenoising(clahe, None, h=8, templateWindowSize=7, searchWindowSize=21)
+    if light_preprocess:
+        # Minimal preprocessing - just light blur for noise reduction
+        # This preserves characters at edges that may be lost with heavy preprocessing
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     else:
-        denoised = clahe
-    
-    # Sharpen the image for better character edges
-    kernel_sharpen = np.array([[-1, -1, -1],
-                               [-1,  9, -1],
-                               [-1, -1, -1]])
-    sharpened = cv2.filter2D(denoised, -1, kernel_sharpen)
-    
-    blurred = cv2.GaussianBlur(sharpened, (3, 3), 0)  # Reduced blur kernel
+        # Standard preprocessing
+        # Apply CLAHE for contrast enhancement - moderate clipLimit to preserve detail
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        
+        # Optional light denoising - reduced strength to preserve character details
+        if denoise:
+            # Use lighter denoising to avoid losing thin strokes
+            denoised = cv2.fastNlMeansDenoising(clahe, None, h=5, templateWindowSize=7, searchWindowSize=21)
+        else:
+            denoised = clahe
+        
+        # Light sharpening to enhance edges without creating artifacts
+        kernel_sharpen = np.array([[0, -1, 0],
+                                   [-1,  5, -1],
+                                   [0, -1, 0]])
+        sharpened = cv2.filter2D(denoised, -1, kernel_sharpen)
+        
+        # Very light blur to reduce noise while preserving edges
+        blurred = cv2.GaussianBlur(sharpened, (3, 3), 0)
 
     if method == "adaptive":
+        # Adaptive threshold - good for uneven lighting
+        # Use smaller block size (15) for better character separation
         binary = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 3
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 5
         )
     elif method == "combined":
-        # Try both methods and choose better one based on character-like regions
+        # Try multiple methods and choose best one based on character-like regions
         _, otsu_bin = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        adapt_bin = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 3
+        # Try two adaptive variants for different plate conditions
+        adapt_bin1 = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 5
         )
-        # Choose based on which has more reasonable connected components
+        adapt_bin2 = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 3
+        )
+        # Choose based on which has more character-like connected components
         otsu_score = _count_char_like_components(cv2.bitwise_not(otsu_bin))
-        adapt_score = _count_char_like_components(cv2.bitwise_not(adapt_bin))
-        binary = otsu_bin if otsu_score >= adapt_score else adapt_bin
+        adapt1_score = _count_char_like_components(cv2.bitwise_not(adapt_bin1))
+        adapt2_score = _count_char_like_components(cv2.bitwise_not(adapt_bin2))
+        
+        # Pick the one with highest character count
+        best_score = max(otsu_score, adapt1_score, adapt2_score)
+        if adapt1_score == best_score:
+            binary = adapt_bin1
+        elif adapt2_score == best_score:
+            binary = adapt_bin2
+        else:
+            binary = otsu_bin
     else:
         _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Clean small noise with morphology
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+    # Light morphology - only if aggressive mode
+    if aggressive:
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+    # Skip morphology when not aggressive to preserve edge characters
 
     inverted = cv2.bitwise_not(binary)
     return binary, inverted
@@ -217,8 +246,12 @@ def segment_characters(
         # For corrected plates, combined method often works better
         method = "combined"
     
-    binary, inverted = binarize_plate(plate_roi, method=method, denoise=True)
-    h, w = inverted.shape[:2]
+    # Try both preprocessing modes and pick the one that finds more characters
+    # Heavy preprocessing can lose edge characters, light preprocessing may have more noise
+    binary_heavy, inverted_heavy = binarize_plate(plate_roi, method=method, denoise=True, light_preprocess=False)
+    binary_light, inverted_light = binarize_plate(plate_roi, method=method, denoise=False, light_preprocess=True)
+    
+    h, w = inverted_heavy.shape[:2]
     area = h * w
 
     debug_info = {
@@ -230,64 +263,78 @@ def segment_characters(
     # Tuned ranges per plate type - RELAXED for better detection
     if plate_type == "car1":
         # Rectangular 1-line: characters are wider relative to plate
-        min_area = area * 0.004
+        min_area = area * 0.003
         max_area = area * 0.25
-        ar_range = (0.15, 1.2)
-        min_height_ratio = 0.12
+        ar_range = (0.15, 1.5)  # Wider AR range for 1
+        min_height_ratio = 0.15
         expected_rows = 1
         expected_chars = (7, 9)  # NNC-NNN.NN format
     elif plate_type == "bike":
-        # Motorbike: 2 lines, smaller chars
+        # Motorbike: 2 lines, smaller chars - MORE PERMISSIVE
+        min_area = area * 0.002  # Smaller min for thin chars like 1
+        max_area = area * 0.20
+        ar_range = (0.10, 1.5)  # Allow thin chars (1, I) and wide chars
+        min_height_ratio = 0.15  # Chars should be at least 15% of plate height
+        expected_rows = 2
+        expected_chars = (7, 10)  # VN plates: 7-9 chars typical
+    else:  # car2 default (square 2-line)
         min_area = area * 0.003
         max_area = area * 0.25
-        ar_range = (0.12, 1.3)
-        min_height_ratio = 0.10
+        ar_range = (0.12, 1.5)
+        min_height_ratio = 0.12
         expected_rows = 2
-        expected_chars = (7, 9)
-    else:  # car2 default (square 2-line)
-        min_area = area * 0.004
-        max_area = area * 0.25
-        ar_range = (0.15, 1.2)
-        min_height_ratio = 0.10
-        expected_rows = 2
-        expected_chars = (7, 9)
+        expected_chars = (7, 10)
 
-    mask = (inverted > 0).astype("uint8")
-    boxes = _filter_components(mask, min_area=min_area, max_area=max_area, ar_range=ar_range, min_height_ratio=min_height_ratio)
-    
-    debug_info['raw_components'] = len(boxes)
-
-    # Additional filtering: remove outliers by height AND area
-    if boxes:
+    # Helper function to extract boxes from a binary image
+    def extract_boxes_from_binary(inverted_img):
+        mask = (inverted_img > 0).astype("uint8")
+        boxes = _filter_components(mask, min_area=min_area, max_area=max_area, ar_range=ar_range, min_height_ratio=min_height_ratio)
+        
+        if not boxes:
+            return []
+        
+        # Additional filtering
         heights = [b[3] for b in boxes]
         areas = [b[2] * b[3] for b in boxes]
         median_h = np.median(heights)
         median_area = np.median(areas)
         
-        # Keep only boxes with height within 50% of median AND area within 60% of median
-        # Also filter boxes at edge positions (x <= 3 or x+w >= w-3)
-        margin = 3
+        margin = 2
         filtered_boxes = []
         for b in boxes:
             bx, by, bw, bh = b
             box_area = bw * bh
             
-            # Height filter
-            if not (0.5 * median_h <= bh <= 1.5 * median_h):
+            if not (0.4 * median_h <= bh <= 1.6 * median_h):
                 continue
-            
-            # Area filter (detect thin artifacts)
-            if box_area < 0.4 * median_area:
+            if box_area < 0.2 * median_area:
                 continue
-            
-            # Edge filter (reject boxes touching ROI edge - likely plate border)
+            # Slightly relaxed edge filter
             if bx <= margin or bx + bw >= w - margin:
                 continue
             
             filtered_boxes.append(b)
         
-        boxes = filtered_boxes
+        return filtered_boxes
     
+    # Get boxes from both preprocessing modes
+    boxes_heavy = extract_boxes_from_binary(inverted_heavy)
+    boxes_light = extract_boxes_from_binary(inverted_light)
+    
+    # Choose the result with more characters (within expected range)
+    # Light preprocessing often finds more edge characters
+    if len(boxes_light) > len(boxes_heavy) and len(boxes_light) <= expected_chars[1]:
+        boxes = boxes_light
+        inverted = inverted_light
+        binary = binary_light
+        debug_info['preprocess_mode'] = 'light'
+    else:
+        boxes = boxes_heavy
+        inverted = inverted_heavy
+        binary = binary_heavy
+        debug_info['preprocess_mode'] = 'heavy'
+    
+    debug_info['raw_components'] = len(boxes)
     debug_info['filtered_components'] = len(boxes)
 
     # Sort by position

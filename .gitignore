@@ -42,7 +42,7 @@ Thumbs.db
 *.log
 
 # Project specific
-# *.jpg
+*.jpg
 *.png
 *.jpeg
 output/
