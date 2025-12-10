@@ -219,9 +219,9 @@ class LicensePlateRecognizer:
         if roi_gray.size == 0:
             return None
         
-        # Determine plate type from aspect ratio
+        # Determine plate type from aspect ratio AND size
         aspect_ratio = w / float(h) if h > 0 else 1.0
-        plate_type = get_plate_type_from_aspect(aspect_ratio)
+        plate_type = get_plate_type_from_aspect(aspect_ratio, w, h)
         
         # Stage 2: Perspective correction
         corrected = roi_gray

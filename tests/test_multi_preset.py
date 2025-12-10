@@ -83,15 +83,22 @@ def test_merge_boxes():
 
 
 def test_plate_classification():
-    """Test plate type classification by aspect ratio."""
-    # Square plate (AR < 1.8)
-    assert get_plate_type_from_aspect(1.2) == "car_square"
+    """Test plate type classification by aspect ratio and size."""
+    # car2 (2-line): AR < 1.4
+    assert get_plate_type_from_aspect(1.2) == "car2"
     
-    # Rectangular plate (AR > 2.8)
-    assert get_plate_type_from_aspect(4.0) == "car_rect"
+    # car1 (1-line): AR > 2.5
+    assert get_plate_type_from_aspect(4.0) == "car1"
     
-    # Bike plate (1.8 < AR < 2.8)
-    assert get_plate_type_from_aspect(2.0) == "bike"
+    # Intermediate AR (1.4-2.5): depends on size
+    # Without size info (default), uses AR boundary
+    assert get_plate_type_from_aspect(2.0) == "bike"  # No size info → bike
+    
+    # With size info: large plate → car2
+    assert get_plate_type_from_aspect(1.8, width=150, height=80) == "car2"
+    
+    # With size info: small plate → bike
+    assert get_plate_type_from_aspect(1.8, width=100, height=60) == "bike"
     
     print("✅ Plate classification works correctly")
 

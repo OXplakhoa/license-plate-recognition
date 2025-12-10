@@ -652,19 +652,50 @@ def detect_with_fallback(
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def get_plate_type_from_aspect(aspect_ratio: float) -> str:
-    """Classify plate type based on aspect ratio.
+def get_plate_type_from_aspect(aspect_ratio: float, width: int = 0, height: int = 0) -> str:
+    """Classify plate type based on aspect ratio and size.
+    
+    Vietnamese plate sizes (actual):
+    - Car square (2-line): ~190x110mm → AR ≈ 1.73
+    - Car rect (1-line): ~470x110mm → AR ≈ 4.27  
+    - Bike (2-line): ~140x90mm → AR ≈ 1.56
+    
+    The challenge: car_square and bike have similar AR (~1.5-2.0)
+    Use size as secondary criterion: car plates are larger than bike plates
     
     Args:
         aspect_ratio: Width/Height ratio of the detected plate
+        width: Width of detected ROI in pixels (optional, for size-based distinction)
+        height: Height of detected ROI in pixels (optional)
     
     Returns:
-        Plate type string: "car_square", "car_rect", or "bike"
+        Plate type string: "car2" (square 2-line), "car1" (rect 1-line), or "bike"
     """
+    # Long rectangular plate - definitely car 1-line
+    if aspect_ratio > 2.5:
+        return "car1"
+    
+    # Very square plate (AR < 1.4) - likely car 2-line  
+    if aspect_ratio < 1.4:
+        return "car2"
+    
+    # Medium AR (1.4 - 2.5): Could be car2 or bike
+    # Use size to distinguish: car plates are typically larger
+    if width > 0 and height > 0:
+        area = width * height
+        # Car plates are usually larger (wider detection in image)
+        # Typical thresholds: car ROI > 10000 pixels, bike < 8000 pixels
+        # Also car plates tend to be wider absolutely
+        if width > 130 or area > 9000:
+            return "car2"  # Larger = car
+        elif width < 100 and area < 6000:
+            return "bike"  # Smaller = bike
+    
+    # Default fallback based on AR alone
+    # AR 1.4-1.8: more likely car2 (square plates tend to be detected with AR ~1.5-1.8)
+    # AR 1.8-2.5: could be either, but bike plates when detected tend to have AR ~1.5-1.7
     if aspect_ratio < 1.8:
-        return "car_square"
-    elif aspect_ratio > 2.8:
-        return "car_rect"
+        return "car2"
     else:
         return "bike"
 
@@ -680,11 +711,11 @@ def classify_detected_plates(
     Returns:
         Dictionary mapping plate type to list of plates
     """
-    classified = {"car_square": [], "car_rect": [], "bike": []}
+    classified = {"car2": [], "car1": [], "bike": []}
     
     for (x, y, w, h) in plates:
         aspect = w / float(h or 1)
-        plate_type = get_plate_type_from_aspect(aspect)
+        plate_type = get_plate_type_from_aspect(aspect, w, h)
         classified[plate_type].append((x, y, w, h))
     
     return classified
