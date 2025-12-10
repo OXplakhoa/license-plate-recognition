@@ -93,6 +93,8 @@ class LicensePlateRecognizer:
         min_char_score: float = 0.35,
         ocr_method: str = "segment",  # "segment" or "line"
         ocr_engine: str = "tesseract",  # "tesseract" or "easyocr"
+        use_color_detection: bool = False,  # Use color-based detection
+        use_mser_detection: bool = False,  # Use MSER text detection
         debug: bool = False,
     ):
         """
@@ -104,6 +106,8 @@ class LicensePlateRecognizer:
             use_deskew: Apply skew correction after perspective
             min_char_score: Minimum character score to accept detection
             ocr_method: "segment" for per-char OCR, "line" for whole-line OCR
+            use_color_detection: Use color-based detection for difficult images
+            use_mser_detection: Use MSER text region detection for difficult images
             debug: Store debug images in results
         """
         self.use_character_validation = use_character_validation
@@ -112,11 +116,101 @@ class LicensePlateRecognizer:
         self.min_char_score = min_char_score
         self.ocr_method = ocr_method
         self.ocr_engine = ocr_engine
+        self.use_color_detection = use_color_detection
+        self.use_mser_detection = use_mser_detection
         self.debug = debug
         
         # Only configure Tesseract if using it
         if self.ocr_engine == "tesseract":
             configure_tesseract()
+    
+    def _detect_with_retry(
+        self, 
+        gray: np.ndarray, 
+        bgr: np.ndarray,
+        debug_info: dict
+    ) -> List[dict]:
+        """
+        Detect plates with automatic retry using additional methods if initial detection fails.
+        
+        Strategy:
+        1. Try standard detection (contour + edge backup)
+        2. If no valid detection found, retry with color detection
+        3. If still no valid detection, retry with MSER
+        
+        This allows processing most images quickly while falling back to
+        more expensive methods only when needed.
+        """
+        # Method 1: Standard detection (fast)
+        if self.use_character_validation:
+            detections, detect_info = detect_with_character_validation(
+                gray,
+                bgr_image=bgr,
+                min_char_score=self.min_char_score,
+                use_color=self.use_color_detection,
+                use_mser=self.use_mser_detection,
+                debug=True
+            )
+            debug_info['detection'] = detect_info
+        else:
+            detections, detect_info = detect_with_edge_backup(gray, debug=True)
+            debug_info['detection'] = detect_info
+        
+        # Check if we have valid detections
+        valid_detections = [d for d in detections if d.get("char_valid", False)]
+        
+        # If no valid detections and we haven't used color/MSER, try them
+        if not valid_detections and not (self.use_color_detection or self.use_mser_detection):
+            debug_info['retry'] = []
+            
+            # Retry with color detection (using BGR image)
+            retry_detections, retry_info = detect_with_character_validation(
+                gray,
+                bgr_image=bgr,
+                min_char_score=self.min_char_score * 0.8,  # Lower threshold for retry
+                use_color=True,
+                use_mser=False,
+                debug=True
+            )
+            debug_info['retry'].append({'method': 'color', 'info': retry_info})
+            
+            valid_retry = [d for d in retry_detections if d.get("char_valid", False)]
+            if valid_retry:
+                detections = retry_detections
+                debug_info['detection_method'] = 'color_retry'
+            else:
+                # Retry with MSER detection
+                retry_detections, retry_info = detect_with_character_validation(
+                    gray,
+                    bgr_image=bgr,
+                    min_char_score=self.min_char_score * 0.8,
+                    use_color=False,
+                    use_mser=True,
+                    debug=True
+                )
+                debug_info['retry'].append({'method': 'mser', 'info': retry_info})
+                
+                valid_retry = [d for d in retry_detections if d.get("char_valid", False)]
+                if valid_retry:
+                    detections = retry_detections
+                    debug_info['detection_method'] = 'mser_retry'
+                else:
+                    # Final attempt: use both color + MSER
+                    retry_detections, retry_info = detect_with_character_validation(
+                        gray,
+                        bgr_image=bgr,
+                        min_char_score=self.min_char_score * 0.7,
+                        use_color=True,
+                        use_mser=True,
+                        debug=True
+                    )
+                    debug_info['retry'].append({'method': 'color_mser', 'info': retry_info})
+                    
+                    if retry_detections:
+                        detections = retry_detections
+                        debug_info['detection_method'] = 'color_mser_retry'
+        
+        return detections
     
     def recognize(
         self,
@@ -147,17 +241,8 @@ class LicensePlateRecognizer:
         debug_info = {}
         plates: List[PlateResult] = []
         
-        # Stage 1: Detection
-        if self.use_character_validation:
-            detections, detect_info = detect_with_character_validation(
-                gray, 
-                min_char_score=self.min_char_score,
-                debug=True
-            )
-            debug_info['detection'] = detect_info
-        else:
-            detections, detect_info = detect_with_edge_backup(gray, debug=True)
-            debug_info['detection'] = detect_info
+        # Stage 1: Detection with optional auto-retry
+        detections = self._detect_with_retry(gray, bgr, debug_info)
         
         # Limit number of detections
         detections = detections[:max_plates]
@@ -167,6 +252,29 @@ class LicensePlateRecognizer:
             plate_result = self._process_detection(gray, bgr, det)
             if plate_result and plate_result.text:
                 plates.append(plate_result)
+        
+        # If no plates found and we haven't tried color/MSER, retry with enhanced detection
+        if not plates and not (self.use_color_detection or self.use_mser_detection):
+            debug_info['ocr_retry'] = True
+            
+            # Try with color detection
+            color_detections, color_info = detect_with_character_validation(
+                gray,
+                bgr_image=bgr,
+                min_char_score=self.min_char_score * 0.6,  # Lower threshold
+                use_color=True,
+                use_mser=True,
+                debug=True
+            )
+            debug_info['color_mser_detection'] = color_info
+            
+            # Sort by char_score and process
+            color_detections.sort(key=lambda d: d.get('char_score', 0), reverse=True)
+            for det in color_detections[:max_plates]:
+                if det.get('char_valid', False):
+                    plate_result = self._process_detection(gray, bgr, det)
+                    if plate_result and plate_result.text:
+                        plates.append(plate_result)
         
         # Sort by confidence
         plates.sort(key=lambda p: p.confidence, reverse=True)
@@ -373,6 +481,8 @@ def recognize_plate(
 def recognize_plate_file(
     image_path: str,
     ocr_engine: str = "tesseract",
+    use_color_detection: bool = False,
+    use_mser_detection: bool = False,
     debug: bool = False,
 ) -> PipelineResult:
     """
@@ -380,12 +490,20 @@ def recognize_plate_file(
     
     Args:
         image_path: Path to image file
+        ocr_engine: OCR engine ("tesseract" or "easyocr")
+        use_color_detection: Use color-based detection for difficult images
+        use_mser_detection: Use MSER text region detection for difficult images
         debug: Store debug images in results
         
     Returns:
         PipelineResult containing all recognized plates
     """
-    recognizer = LicensePlateRecognizer(debug=debug, ocr_engine=ocr_engine)
+    recognizer = LicensePlateRecognizer(
+        debug=debug, 
+        ocr_engine=ocr_engine,
+        use_color_detection=use_color_detection,
+        use_mser_detection=use_mser_detection,
+    )
     return recognizer.recognize_file(image_path)
 
 

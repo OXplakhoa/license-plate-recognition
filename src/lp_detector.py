@@ -1731,10 +1731,317 @@ def filter_detections_by_characters(
     return valid_detections, stats
 
 
+# ============================================================================
+# PHASE 7: COLOR-BASED AND MSER PLATE DETECTION (for difficult images)
+# ============================================================================
+
+def detect_white_plate_regions(
+    image: np.ndarray,
+    min_area_ratio: float = 0.005,
+    max_area_ratio: float = 0.25,
+    aspect_ratio_range: Tuple[float, float] = (0.8, 5.0),
+    debug: bool = False
+) -> Tuple[List[Tuple[int, int, int, int]], Dict]:
+    """Detect white/light colored plate regions using color thresholding.
+    
+    Vietnamese plates are typically white (car) or yellow (taxi/commercial).
+    This helps detect plates in complex backgrounds like chrome grills.
+    
+    Args:
+        image: BGR or grayscale image
+        min_area_ratio: Minimum region area as ratio of image area
+        max_area_ratio: Maximum region area as ratio of image area
+        aspect_ratio_range: Valid aspect ratio range for plates
+        debug: Return debug information
+    
+    Returns:
+        (plate_boxes, debug_info)
+    """
+    # Ensure BGR image for color analysis
+    if len(image.shape) == 2:
+        bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        bgr = image.copy()
+    
+    h, w = bgr.shape[:2]
+    img_area = h * w
+    
+    # Convert to multiple color spaces
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if len(bgr.shape) == 3 else bgr
+    
+    # White plate detection: high value, low saturation
+    # HSV ranges for white: H=any, S=0-50, V=180-255
+    white_lower = np.array([0, 0, 180], dtype=np.uint8)
+    white_upper = np.array([180, 60, 255], dtype=np.uint8)
+    white_mask = cv2.inRange(hsv, white_lower, white_upper)
+    
+    # Yellow plate detection (for taxi/commercial)
+    # HSV ranges for yellow: H=15-35, S=80-255, V=150-255
+    yellow_lower = np.array([15, 80, 150], dtype=np.uint8)
+    yellow_upper = np.array([35, 255, 255], dtype=np.uint8)
+    yellow_mask = cv2.inRange(hsv, yellow_lower, yellow_upper)
+    
+    # Combine masks
+    color_mask = cv2.bitwise_or(white_mask, yellow_mask)
+    
+    # Clean up mask with morphological operations
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 5))
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+    
+    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel_close)
+    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel_open)
+    
+    # Find contours in color mask
+    contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    plates = []
+    rejected = {"area": 0, "aspect": 0, "solidity": 0}
+    min_area = img_area * min_area_ratio
+    max_area = img_area * max_area_ratio
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if not (min_area <= area <= max_area):
+            rejected["area"] += 1
+            continue
+        
+        x, y, bw, bh = cv2.boundingRect(contour)
+        aspect = bw / float(bh) if bh > 0 else 0
+        
+        if not (aspect_ratio_range[0] <= aspect <= aspect_ratio_range[1]):
+            rejected["aspect"] += 1
+            continue
+        
+        # Check solidity
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 0
+        
+        if solidity < 0.4:
+            rejected["solidity"] += 1
+            continue
+        
+        plates.append((x, y, bw, bh))
+    
+    debug_info = {
+        "method": "color_white_yellow",
+        "contours_found": len(contours),
+        "rejected": rejected,
+        "white_mask": white_mask if debug else None,
+        "yellow_mask": yellow_mask if debug else None,
+        "combined_mask": color_mask if debug else None
+    }
+    
+    return plates, debug_info
+
+
+def detect_with_mser(
+    gray_image: np.ndarray,
+    min_area_ratio: float = 0.003,
+    max_area_ratio: float = 0.25,
+    aspect_ratio_range: Tuple[float, float] = (0.8, 5.0),
+    debug: bool = False
+) -> Tuple[List[Tuple[int, int, int, int]], Dict]:
+    """Detect plate regions using MSER (Maximally Stable Extremal Regions).
+    
+    MSER is good at finding text-like regions because text characters
+    typically form stable regions with consistent intensity.
+    
+    Args:
+        gray_image: Grayscale image
+        min_area_ratio: Minimum region area as ratio of image area
+        max_area_ratio: Maximum region area as ratio of image area
+        aspect_ratio_range: Valid aspect ratio range for plates
+        debug: Return debug information
+    
+    Returns:
+        (plate_boxes, debug_info)
+    """
+    gray = ensure_grayscale(gray_image)
+    h, w = gray.shape[:2]
+    img_area = h * w
+    
+    # Create MSER detector
+    mser = cv2.MSER_create(
+        delta=5,
+        min_area=60,
+        max_area=int(img_area * 0.1),
+        max_variation=0.25,
+        min_diversity=0.2,
+        max_evolution=200,
+        area_threshold=1.01,
+        min_margin=0.003,
+        edge_blur_size=5
+    )
+    
+    # Detect MSER regions
+    regions, _ = mser.detectRegions(gray)
+    
+    if len(regions) == 0:
+        return [], {"method": "mser", "regions_found": 0}
+    
+    # Convert regions to bounding boxes
+    region_boxes = []
+    for region in regions:
+        x, y, bw, bh = cv2.boundingRect(region)
+        region_boxes.append((x, y, bw, bh))
+    
+    # Group nearby boxes (text regions tend to cluster for plate)
+    # Create mask of MSER regions
+    mser_mask = np.zeros((h, w), dtype=np.uint8)
+    for region in regions:
+        cv2.fillPoly(mser_mask, [region], 255)
+    
+    # Dilate to connect nearby text regions
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 7))
+    dilated = cv2.dilate(mser_mask, kernel, iterations=2)
+    
+    # Close gaps
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 10))
+    closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, kernel_close)
+    
+    # Find contours of grouped regions
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    plates = []
+    rejected = {"area": 0, "aspect": 0, "density": 0}
+    min_area = img_area * min_area_ratio
+    max_area = img_area * max_area_ratio
+    
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        area = bw * bh
+        
+        if not (min_area <= area <= max_area):
+            rejected["area"] += 1
+            continue
+        
+        aspect = bw / float(bh) if bh > 0 else 0
+        if not (aspect_ratio_range[0] <= aspect <= aspect_ratio_range[1]):
+            rejected["aspect"] += 1
+            continue
+        
+        # Check MSER density in this region (should have text-like content)
+        roi_mask = mser_mask[y:y+bh, x:x+bw]
+        density = np.sum(roi_mask > 0) / float(area) if area > 0 else 0
+        
+        if density < 0.15:  # At least 15% MSER content
+            rejected["density"] += 1
+            continue
+        
+        plates.append((x, y, bw, bh))
+    
+    debug_info = {
+        "method": "mser",
+        "regions_found": len(regions),
+        "contours_found": len(contours),
+        "rejected": rejected,
+        "mser_mask": mser_mask if debug else None,
+        "dilated": dilated if debug else None
+    }
+    
+    return plates, debug_info
+
+
+def detect_with_all_methods(
+    image: np.ndarray,
+    presets: Optional[List[str]] = None,
+    use_color: bool = True,
+    use_mser: bool = True,
+    debug: bool = False
+) -> Tuple[List[Dict], Dict]:
+    """Comprehensive detection using multiple methods with fusion.
+    
+    Combines:
+    1. Contour-based multi-preset detection
+    2. Edge density sliding window (backup)
+    3. Color-based detection (white/yellow plates)
+    4. MSER text region detection
+    
+    Results are fused using NMS and character validation scoring.
+    
+    Args:
+        image: BGR or grayscale image
+        presets: Presets for contour detection
+        use_color: Whether to use color-based detection
+        use_mser: Whether to use MSER detection
+        debug: Return debug information
+    
+    Returns:
+        (detections, debug_info)
+    """
+    # Prepare images
+    if len(image.shape) == 3:
+        bgr = image
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+        bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    
+    all_candidates = []
+    debug_info = {"methods_used": []}
+    
+    # Method 1: Contour-based with edge backup
+    contour_results, contour_debug = detect_with_edge_backup(
+        gray, presets=presets, debug=debug
+    )
+    for det in contour_results:
+        det["source"] = "contour"
+        all_candidates.append(det)
+    debug_info["contour"] = contour_debug
+    debug_info["methods_used"].append("contour")
+    
+    # Method 2: Color-based detection
+    if use_color:
+        color_plates, color_debug = detect_white_plate_regions(bgr, debug=debug)
+        for plate in color_plates:
+            x, y, w, h = plate
+            all_candidates.append({
+                "box": plate,
+                "method": "color",
+                "source": "color",
+                "score": 0.8,  # Lower initial score
+                "aspect_ratio": w / float(h) if h > 0 else 0
+            })
+        debug_info["color"] = color_debug
+        debug_info["methods_used"].append("color")
+    
+    # Method 3: MSER text region detection
+    if use_mser:
+        mser_plates, mser_debug = detect_with_mser(gray, debug=debug)
+        for plate in mser_plates:
+            x, y, w, h = plate
+            all_candidates.append({
+                "box": plate,
+                "method": "mser",
+                "source": "mser",
+                "score": 0.7,  # Lower initial score
+                "aspect_ratio": w / float(h) if h > 0 else 0
+            })
+        debug_info["mser"] = mser_debug
+        debug_info["methods_used"].append("mser")
+    
+    # Remove duplicates using NMS
+    if all_candidates:
+        boxes = [c["box"] for c in all_candidates]
+        scores = [c.get("score", 0.5) for c in all_candidates]
+        keep_boxes = non_maximum_suppression(boxes, scores, iou_threshold=0.3)
+        keep_set = set(keep_boxes)
+        all_candidates = [c for c in all_candidates if c["box"] in keep_set]
+    
+    debug_info["total_candidates"] = len(all_candidates)
+    
+    return all_candidates, debug_info
+
+
 def detect_with_character_validation(
     gray_image: np.ndarray,
+    bgr_image: np.ndarray = None,
     presets: Optional[List[str]] = None,
     use_edge_backup: bool = True,
+    use_color: bool = False,
+    use_mser: bool = False,
     min_char_score: float = 0.35,
     expected_chars: Tuple[int, int] = (5, 10),
     debug: bool = False
@@ -1744,12 +2051,17 @@ def detect_with_character_validation(
     This combines:
     1. Multi-preset contour detection
     2. Optional edge density backup
-    3. Character-based ROI validation
+    3. Optional color-based detection
+    4. Optional MSER text region detection
+    5. Character-based ROI validation
     
     Args:
         gray_image: Grayscale image
+        bgr_image: Original BGR image (needed for color detection)
         presets: Detection presets to use
         use_edge_backup: Whether to use edge density backup
+        use_color: Whether to use color-based detection (for difficult images)
+        use_mser: Whether to use MSER detection (for difficult images)
         min_char_score: Minimum character validation score
         expected_chars: Expected character count range
         debug: Return debug info
@@ -1759,8 +2071,17 @@ def detect_with_character_validation(
     """
     gray = ensure_grayscale(gray_image)
     
-    # Step 1: Detect candidates
-    if use_edge_backup:
+    # Step 1: Detect candidates using selected methods
+    if use_color or use_mser:
+        # Use comprehensive multi-method detection
+        # Pass BGR image if available, otherwise pass gray (will be converted)
+        input_image = bgr_image if bgr_image is not None else gray
+        candidates, detect_info = detect_with_all_methods(
+            input_image, presets=presets, 
+            use_color=use_color, use_mser=use_mser,
+            debug=debug
+        )
+    elif use_edge_backup:
         candidates, detect_info = detect_with_edge_backup(gray, presets=presets, debug=debug)
     else:
         plates, detect_info = detect_multi_preset(gray, presets=presets, debug=debug)
@@ -1787,3 +2108,4 @@ def detect_with_character_validation(
         return valid_detections, debug_info
     else:
         return [d for d in valid_detections if d.get("char_valid", False)], debug_info
+

@@ -45,7 +45,8 @@ def main():
     parser.add_argument("--plate-type", default="auto", help="Plate type (ignored, pipeline auto-detects)")
     parser.add_argument("--output", default="result.jpg", help="Path to save the output image")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--engine", default="tesseract", choices=["tesseract", "easyocr"], help="OCR engine to use: tesseract(fast) or easyocr(accurate)")  
+    parser.add_argument("--engine", default="tesseract", choices=["tesseract", "easyocr"], help="OCR engine to use: tesseract(fast) or easyocr(accurate)")
+    parser.add_argument("--hard-mode", action="store_true", help="Enable extra detection methods for difficult images (color + MSER)")
 
     args = parser.parse_args()
 
@@ -56,12 +57,20 @@ def main():
 
     print("=" * 50)
     print(f"Processing: {args.image}")
+    if args.hard_mode:
+        print("Mode: HARD (color + MSER detection enabled)")
     print("=" * 50)
 
     # --- RUN THE PIPELINE ---
     try:
         # recognize_plate_file returns a PipelineResult object
-        result = recognize_plate_file(args.image, ocr_engine=args.engine, debug=args.debug)
+        result = recognize_plate_file(
+            args.image, 
+            ocr_engine=args.engine, 
+            use_color_detection=args.hard_mode,
+            use_mser_detection=args.hard_mode,
+            debug=args.debug
+        )
         
     except Exception as e:
         print(f"Critical Error during pipeline execution: {e}")
