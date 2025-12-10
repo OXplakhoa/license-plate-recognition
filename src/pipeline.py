@@ -39,6 +39,7 @@ from .lp_detector import (
 from .character_segmenter import segment_characters, segment_characters_multi_method, SegmentationResult
 from .ocr_engine import ocr_characters, ocr_plate_line, ocr_plate_multi_psm, OCRResult, configure_tesseract
 from .ocr_easy import ocr_plate_easyocr
+from .heuristics import apply_heuristics, is_valid_plate 
 
 @dataclass
 class PlateResult:
@@ -238,23 +239,27 @@ class LicensePlateRecognizer:
         
         # Stage 3 & 4: Segmentation and OCR
         if self.ocr_engine == "easyocr":
-            # --- EASYOCR PATH ---
-            text, confidence, char_confs = ocr_plate_easyocr(corrected)
-            seg_chars = None  # No segmentation info from EasyOCR
+            raw_text, confidence, char_confs = ocr_plate_easyocr(corrected)
+            seg_chars = None
         else:
-            # --- TESSERACT PATH ---
+            # Tesseract path
             if self.ocr_method == "segment":
-                text, confidence, char_confs, seg_chars = self._ocr_with_segmentation(
-                corrected, plate_type
-            )
+                raw_text, confidence, char_confs, seg_chars = self._ocr_with_segmentation(corrected, plate_type)
             else:
-                text, confidence, char_confs, seg_chars = self._ocr_line(
-                    corrected, plate_type
-            )
+                raw_text, confidence, char_confs, seg_chars = self._ocr_line(corrected, plate_type)
+
+        # --- NEW: APPLY HEURISTICS ---
+        # 1. Correct the text (e.g. 502... -> 50Z...)
+        final_text = apply_heuristics(raw_text)
         
-        # Build result
+        # 2. Filter invalid plates (e.g. "507")
+        if not is_valid_plate(final_text):
+            # If it looks like garbage, return None so it is ignored
+            return None
+
+        # Build result with the CORRECTED text
         result = PlateResult(
-            text=text,
+            text=final_text,  # Use final_text instead of text/raw_text
             confidence=confidence,
             box=(x, y, w, h),
             plate_type=plate_type,
