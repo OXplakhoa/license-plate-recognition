@@ -38,7 +38,7 @@ from .lp_detector import (
 )
 from .character_segmenter import segment_characters, segment_characters_multi_method, SegmentationResult
 from .ocr_engine import ocr_characters, ocr_plate_line, ocr_plate_multi_psm, OCRResult, configure_tesseract
-
+from .ocr_easy import ocr_plate_easyocr
 
 @dataclass
 class PlateResult:
@@ -91,6 +91,7 @@ class LicensePlateRecognizer:
         use_deskew: bool = True,
         min_char_score: float = 0.35,
         ocr_method: str = "segment",  # "segment" or "line"
+        ocr_engine: str = "tesseract",  # "tesseract" or "easyocr"
         debug: bool = False,
     ):
         """
@@ -109,10 +110,12 @@ class LicensePlateRecognizer:
         self.use_deskew = use_deskew
         self.min_char_score = min_char_score
         self.ocr_method = ocr_method
+        self.ocr_engine = ocr_engine
         self.debug = debug
         
-        # Configure Tesseract on init
-        configure_tesseract()
+        # Only configure Tesseract if using it
+        if self.ocr_engine == "tesseract":
+            configure_tesseract()
     
     def recognize(
         self,
@@ -234,13 +237,19 @@ class LicensePlateRecognizer:
                 corrected = corrected_result
         
         # Stage 3 & 4: Segmentation and OCR
-        if self.ocr_method == "segment":
-            text, confidence, char_confs, seg_chars = self._ocr_with_segmentation(
+        if self.ocr_engine == "easyocr":
+            # --- EASYOCR PATH ---
+            text, confidence, char_confs = ocr_plate_easyocr(corrected)
+            seg_chars = None  # No segmentation info from EasyOCR
+        else:
+            # --- TESSERACT PATH ---
+            if self.ocr_method == "segment":
+                text, confidence, char_confs, seg_chars = self._ocr_with_segmentation(
                 corrected, plate_type
             )
-        else:
-            text, confidence, char_confs, seg_chars = self._ocr_line(
-                corrected, plate_type
+            else:
+                text, confidence, char_confs, seg_chars = self._ocr_line(
+                    corrected, plate_type
             )
         
         # Build result
@@ -358,6 +367,7 @@ def recognize_plate(
 
 def recognize_plate_file(
     image_path: str,
+    ocr_engine: str = "tesseract",
     debug: bool = False,
 ) -> PipelineResult:
     """
@@ -370,7 +380,7 @@ def recognize_plate_file(
     Returns:
         PipelineResult containing all recognized plates
     """
-    recognizer = LicensePlateRecognizer(debug=debug)
+    recognizer = LicensePlateRecognizer(debug=debug, ocr_engine=ocr_engine)
     return recognizer.recognize_file(image_path)
 
 
