@@ -8,6 +8,8 @@ Hiển thị chi tiết từng bước xử lý theo project.txt:
   4. Chuẩn hóa và phân tách ký tự (Segmentation)
   5. Nhận dạng ký tự (OCR)
   6. Hiển thị và đánh giá kết quả
+
+Refactored: Sử dụng pipeline chính để đảm bảo kết quả nhất quán với main.py
 """
 import sys
 import argparse
@@ -22,20 +24,23 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import matplotlib.gridspec as gridspec
 
+# Import pipeline chính - ĐÂY LÀ THAY ĐỔI QUAN TRỌNG
+from src.pipeline import LicensePlateRecognizer, PlateResult
 from src.lp_detector import (
-    detect_with_character_validation,
     correct_plate_perspective_and_skew,
-    detect_white_plate_regions,
-    detect_with_mser,
     get_plate_type_from_aspect,
 )
 from src.character_segmenter import segment_characters, binarize_plate
-from src.utils import ensure_grayscale
 from src.heuristics import apply_heuristics
+from src.ocr_engine import format_plate_display, validate_vn_plate_format
 
 
 def create_detailed_visualization(image_path: str, output_path: str = None, ocr_engine: str = "easyocr"):
-    """Create detailed step-by-step visualization."""
+    """Create detailed step-by-step visualization.
+    
+    Sử dụng pipeline chính (LicensePlateRecognizer) để đảm bảo kết quả
+    nhất quán với main.py, sau đó thêm visualization cho từng bước.
+    """
     
     print("=" * 70)
     print("VISUALIZATION CHI TIẾT - NHẬN DẠNG BIỂN SỐ XE VIỆT NAM")
@@ -55,12 +60,44 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     h_orig, w_orig = img_bgr.shape[:2]
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    
     print(f"✓ Đọc ảnh thành công: {image_path}")
     print(f"  - Kích thước: {w_orig}x{h_orig} pixels")
     print(f"  - Số kênh màu: {img_bgr.shape[2]} (BGR)")
     
     # =========================================================================
-    # BƯỚC 2: Tiền xử lý ảnh (Preprocessing)
+    # SỬ DỤNG PIPELINE CHÍNH - Giống hệt main.py
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("CHẠY PIPELINE CHÍNH (giống main.py)")
+    print("=" * 70)
+    
+    # Khởi tạo recognizer giống main.py
+    recognizer = LicensePlateRecognizer(
+        ocr_engine=ocr_engine,
+        use_character_validation=True,
+        use_perspective_correction=True,
+        use_deskew=True,
+        debug=True  # Enable debug để lấy thêm thông tin
+    )
+    
+    # Chạy pipeline
+    result = recognizer.recognize(img_bgr)
+    
+    # Lấy kết quả
+    plate_result = result.best_plate
+    if plate_result:
+        print(f"  ✓ Phát hiện biển số: {plate_result.text}")
+        print(f"  ✓ Confidence: {plate_result.confidence:.2f}%")
+        print(f"  ✓ Box: {plate_result.box}")
+        print(f"  ✓ Type: {plate_result.plate_type}")
+        print(f"  ✓ Detection method: {plate_result.detection_method}")
+    else:
+        print("  ❌ Không phát hiện được biển số")
+    
+    # =========================================================================
+    # BƯỚC 2: Tiền xử lý ảnh (Preprocessing) - CHỈ ĐỂ VISUALIZATION
     # =========================================================================
     print("\n" + "=" * 70)
     print("BƯỚC 2: TIỀN XỬ LÝ ẢNH (PREPROCESSING)")
@@ -68,7 +105,6 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     
     # 2.1 Chuyển ảnh sang thang xám
     print("\n📍 Bước 2.1: Chuyển sang ảnh xám (Grayscale)")
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     print(f"  → Từ 3 kênh (BGR) → 1 kênh (Gray)")
     print(f"  → Kích thước dữ liệu: {img_bgr.nbytes} → {gray.nbytes} bytes")
     
@@ -96,7 +132,7 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     print(f"  → tileGridSize: 8x8")
     
     # =========================================================================
-    # BƯỚC 3: Phát hiện vùng biển số (Detection)
+    # BƯỚC 3: Phát hiện vùng biển số (Detection) - CHỈ ĐỂ VISUALIZATION
     # =========================================================================
     print("\n" + "=" * 70)
     print("BƯỚC 3: PHÁT HIỆN VÙNG BIỂN SỐ (DETECTION)")
@@ -113,7 +149,7 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     sobel_x = cv2.Sobel(gaussian_blur, cv2.CV_64F, 1, 0, ksize=3)
     sobel_y = cv2.Sobel(gaussian_blur, cv2.CV_64F, 0, 1, ksize=3)
     sobel_mag = np.sqrt(sobel_x**2 + sobel_y**2)
-    sobel_mag = np.uint8(255 * sobel_mag / sobel_mag.max())
+    sobel_mag = np.uint8(255 * sobel_mag / sobel_mag.max()) if sobel_mag.max() > 0 else np.zeros_like(gray)
     print(f"  → Sobel X (gradient ngang)")
     print(f"  → Sobel Y (gradient dọc)")
     print(f"  → Combined magnitude")
@@ -151,76 +187,14 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     
     print(f"  → Contour phù hợp tỷ lệ biển số: {len(plate_candidates)}")
     
-    # 3.6 Detection với Character Validation (với auto-retry như pipeline chính)
-    print("\n📍 Bước 3.6: Detection với Character Validation")
-    
-    # First try: Standard detection
-    detections, det_info = detect_with_character_validation(
-        gray, 
-        bgr_image=img_bgr,
-        min_char_score=0.35, 
-        debug=True
-    )
-    valid_detections = [d for d in detections if d.get("char_valid", False)]
-    detection_method = "contour+edge"
-    
-    # Luôn thử thêm color + MSER để có nhiều candidates hơn
-    print("  → Thử thêm Color + MSER detection...")
-    color_detections, color_info = detect_with_character_validation(
-        gray,
-        bgr_image=img_bgr,
-        min_char_score=0.25,  # Lower threshold
-        use_color=True,
-        use_mser=True,
-        debug=True
-    )
-    
-    # Merge detections, prioritize by char_score
-    all_detections = detections + [d for d in color_detections if d.get("char_valid", False)]
-    
-    # Remove duplicates (same box)
-    seen_boxes = set()
-    unique_detections = []
-    for d in all_detections:
-        box_key = tuple(d['box'])
-        if box_key not in seen_boxes:
-            seen_boxes.add(box_key)
-            unique_detections.append(d)
-    
-    # Sort by char_score
-    unique_detections.sort(key=lambda d: d.get('char_score', 0), reverse=True)
-    detections = unique_detections
-    
-    # Determine which method found the best detection
-    if detections:
-        best_source = detections[0].get('source', detections[0].get('method', 'unknown'))
-        if best_source in ['color', 'mser']:
-            detection_method = f"color+mser ({best_source})"
-        else:
-            detection_method = "contour+edge"
-    
-    print(f"  → Số vùng phát hiện: {len(detections)}")
-    print(f"  → Phương pháp tốt nhất: {detection_method}")
-    
-    if detections:
-        best_det = detections[0]
-        x, y, w, h = best_det['box']
-        source = best_det.get('source', best_det.get('method', 'unknown'))
-        print(f"  → Vùng tốt nhất: ({x}, {y}) - {w}x{h}")
-        print(f"  → Điểm char_score: {best_det.get('char_score', 0):.2f}")
-        print(f"  → Nguồn: {source}")
-    
-    # Extract ROI
-    roi_gray = None
-    plate_type = "car2"
-    if detections:
-        x, y, w, h = detections[0]['box']
-        roi_gray = gray[y:y+h, x:x+w]
-        ar = w / h
-        area = w * h
-        # Use improved classification with size
-        plate_type = get_plate_type_from_aspect(ar, w, h)
-        print(f"  → Loại biển số: {plate_type} (AR={ar:.2f}, Size={w}x{h}, Area={area})")
+    # 3.6 Hiển thị kết quả detection từ pipeline
+    print("\n📍 Bước 3.6: Detection Result (từ Pipeline chính)")
+    if plate_result:
+        x, y, w, h = plate_result.box
+        ar = w / h if h > 0 else 0
+        print(f"  → Vùng phát hiện: ({x}, {y}) - {w}x{h}")
+        print(f"  → Phương pháp: {plate_result.detection_method}")
+        print(f"  → Loại biển số: {plate_result.plate_type} (AR={ar:.2f})")
     
     # =========================================================================
     # BƯỚC 4: Chuẩn hóa và phân tách ký tự (Segmentation)
@@ -229,7 +203,22 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     print("BƯỚC 4: CHUẨN HÓA VÀ PHÂN TÁCH KÝ TỰ (SEGMENTATION)")
     print("=" * 70)
     
-    if roi_gray is not None:
+    roi_gray = None
+    roi_corrected = None
+    otsu_binary = None
+    otsu_inv = None
+    adaptive_binary = None
+    binary_combined = None
+    seg_result = None
+    char_images_28x28 = []
+    char_contours = []
+    plate_type = "car1"
+    
+    if plate_result:
+        x, y, w, h = plate_result.box
+        roi_gray = gray[y:y+h, x:x+w]
+        plate_type = plate_result.plate_type
+        
         # 4.0 Perspective Correction
         print("\n📍 Bước 4.0: Hiệu chỉnh phối cảnh (Perspective Correction)")
         roi_box = (0, 0, roi_gray.shape[1], roi_gray.shape[0])
@@ -270,15 +259,14 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
         print(f"  → Tổng contour: {len(contours_char)}")
         
         # Filter character contours
-        char_contours = []
         roi_h, roi_w = roi_corrected.shape[:2]
         for cnt in contours_char:
-            x, y, w, h = cv2.boundingRect(cnt)
-            ar = w / h if h > 0 else 0
-            hr = h / roi_h
-            area = w * h
+            cx, cy, cw, ch = cv2.boundingRect(cnt)
+            ar = cw / ch if ch > 0 else 0
+            hr = ch / roi_h
+            area = cw * ch
             if 0.1 < ar < 1.5 and 0.15 < hr < 0.6 and area > 50:
-                char_contours.append((x, y, w, h))
+                char_contours.append((cx, cy, cw, ch))
         
         print(f"  → Contour ký tự hợp lệ: {len(char_contours)}")
         
@@ -290,7 +278,6 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
         
         # 4.6 Căn chỉnh và resize ký tự
         print("\n📍 Bước 4.6: Căn chỉnh và Resize ký tự")
-        char_images_28x28 = []
         for i, (cx, cy, cw, ch) in enumerate(seg_result.boxes):
             char_img = seg_result.inverted_binary[cy:cy+ch, cx:cx+cw]
             # Resize to 28x28 with padding
@@ -302,19 +289,9 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
             resized = cv2.resize(canvas, (28, 28), interpolation=cv2.INTER_AREA)
             char_images_28x28.append(resized)
         print(f"  → {len(char_images_28x28)} ký tự được resize về 28x28")
-    else:
-        roi_corrected = None
-        otsu_binary = None
-        otsu_inv = None
-        adaptive_binary = None
-        binary_combined = None
-        inv_combined = None
-        seg_result = None
-        char_images_28x28 = []
-        char_contours = []
     
     # =========================================================================
-    # BƯỚC 5: Nhận dạng ký tự (OCR)
+    # BƯỚC 5: Nhận dạng ký tự (OCR) - Kết quả từ Pipeline
     # =========================================================================
     print("\n" + "=" * 70)
     print("BƯỚC 5: NHẬN DẠNG KÝ TỰ (OCR)")
@@ -322,64 +299,15 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     
     ocr_text = ""
     ocr_confidence = 0.0
-    char_results = []
     
-    if roi_corrected is not None:
-        if ocr_engine == "easyocr":
-            print("\n📍 Sử dụng EasyOCR (Deep Learning based)")
-            try:
-                import easyocr
-                print("  → Loading EasyOCR model...")
-                reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-                results = reader.readtext(roi_corrected, detail=1)
-                
-                texts = []
-                confs = []
-                for bbox, text, conf in results:
-                    texts.append(text)
-                    confs.append(conf)
-                    char_results.append({'text': text, 'conf': conf, 'bbox': bbox})
-                    print(f"  → Detected: '{text}' (conf={conf:.2%})")
-                
-                ocr_text = ''.join(texts).replace(' ', '').upper()
-                ocr_confidence = np.mean(confs) * 100 if confs else 0
-                
-            except Exception as e:
-                print(f"  ❌ EasyOCR error: {e}")
-        else:
-            print("\n📍 Sử dụng Tesseract OCR")
-            try:
-                import pytesseract
-                
-                # Per-character OCR
-                print("  → OCR từng ký tự...")
-                chars = []
-                for i, char_img in enumerate(seg_result.char_images if seg_result else []):
-                    text = pytesseract.image_to_string(
-                        char_img, 
-                        config='--psm 10 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-                    ).strip()
-                    chars.append(text[:1] if text else '?')
-                    char_results.append({'text': text[:1] if text else '?', 'conf': -1})
-                
-                ocr_text = ''.join(chars)
-                
-                # Also try full plate OCR
-                print("  → OCR toàn bộ biển số...")
-                full_text = pytesseract.image_to_string(
-                    roi_corrected,
-                    config='--psm 7 --oem 3'
-                ).strip().replace(' ', '').upper()
-                print(f"  → Full OCR: '{full_text}'")
-                
-                if len(full_text) > len(ocr_text):
-                    ocr_text = full_text
-                    
-            except Exception as e:
-                print(f"  ❌ Tesseract error: {e}")
-        
-        print(f"\n  🔤 Kết quả OCR: {ocr_text}")
+    if plate_result:
+        ocr_text = plate_result.text
+        ocr_confidence = plate_result.confidence
+        print(f"\n📍 Kết quả OCR từ Pipeline ({ocr_engine.upper()})")
+        print(f"  🔤 Kết quả: {ocr_text}")
         print(f"  📊 Confidence: {ocr_confidence:.2f}%")
+    else:
+        print("\n  ❌ Không có kết quả OCR (không phát hiện được biển số)")
     
     # =========================================================================
     # BƯỚC 6: Hiển thị và đánh giá kết quả
@@ -388,17 +316,12 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     print("BƯỚC 6: HIỂN THỊ VÀ ĐÁNH GIÁ KẾT QUẢ")
     print("=" * 70)
     
-    # Post-processing - sử dụng heuristics mới (bao gồm province code fix)
-    from src.ocr_engine import format_plate_display, validate_vn_plate_format
-    
-    # Apply heuristics (đã import ở đầu file)
-    corrected_text = apply_heuristics(ocr_text)
-    formatted_text = format_plate_display(corrected_text)
-    is_valid = validate_vn_plate_format(corrected_text)
+    # Post-processing
+    formatted_text = format_plate_display(ocr_text) if ocr_text else ""
+    is_valid = validate_vn_plate_format(ocr_text) if ocr_text else False
     
     print(f"\n📍 Hậu xử lý:")
-    print(f"  → Text gốc: {ocr_text}")
-    print(f"  → Sau heuristics: {corrected_text}")
+    print(f"  → Text từ Pipeline: {ocr_text}")
     print(f"  → Formatted: {formatted_text}")
     print(f"  → Valid format: {'✓ Có' if is_valid else '✗ Không'}")
     
@@ -479,8 +402,8 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     # Show detection result
     ax12 = fig.add_subplot(gs[3, 4:6])
     img_detected = img_rgb.copy()
-    if detections:
-        x, y, w, h = detections[0]['box']
+    if plate_result:
+        x, y, w, h = plate_result.box
         cv2.rectangle(img_detected, (x, y), (x+w, y+h), (0, 255, 0), 3)
     ax12.imshow(img_detected)
     ax12.set_title('3.6 Detection Result', fontsize=11, fontweight='bold')
@@ -576,8 +499,8 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     # ----- ROW 8: Final Result -----
     ax24 = fig.add_subplot(gs[7, 0:2])
     ax24.imshow(img_rgb)
-    if detections:
-        x, y, w, h = detections[0]['box']
+    if plate_result:
+        x, y, w, h = plate_result.box
         rect = Rectangle((x, y), w, h, linewidth=3, edgecolor='lime', facecolor='none')
         ax24.add_patch(rect)
         ax24.text(x, y-10, formatted_text, fontsize=14, color='lime', fontweight='bold',
@@ -617,7 +540,7 @@ def create_detailed_visualization(image_path: str, output_path: str = None, ocr_
     plt.close()
     
     return {
-        'text': corrected_text,
+        'text': ocr_text,
         'confidence': ocr_confidence,
         'is_valid': is_valid,
         'formatted': formatted_text,
