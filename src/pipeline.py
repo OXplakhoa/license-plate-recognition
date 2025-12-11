@@ -362,8 +362,22 @@ class LicensePlateRecognizer:
         
         # 2. Filter invalid plates (e.g. "507")
         if not is_valid_plate(final_text):
-            # If it looks like garbage, return None so it is ignored
-            return None
+            # If initial OCR looks invalid, try segmentation-based OCR as a fallback
+            try:
+                seg_result = segment_characters_multi_method(corrected, plate_type=plate_type)
+                if seg_result and getattr(seg_result, 'char_images', None):
+                    from .ocr_engine import ocr_characters
+                    seg_ocr = ocr_characters(seg_result.char_images, vn_plate=True, plate_type=plate_type)
+                    seg_text = apply_heuristics(seg_ocr.text)
+                    if is_valid_plate(seg_text):
+                        final_text = seg_text
+                        confidence = seg_ocr.mean_conf if seg_ocr.mean_conf >= 0 else confidence
+                    else:
+                        return None
+                else:
+                    return None
+            except Exception:
+                return None
 
         # Build result with the CORRECTED text
         result = PlateResult(

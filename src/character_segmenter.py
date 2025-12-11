@@ -143,6 +143,44 @@ def _count_char_like_components(mask: np.ndarray) -> int:
     return count
 
 
+def _detect_two_line_layout(boxes: Sequence[Tuple[int, int, int, int]]) -> bool:
+    """Detect if character boxes are arranged in 2 lines.
+    
+    Analyzes the Y-distribution of character centers to determine if there's
+    a clear vertical gap indicating 2 rows of text.
+    
+    Args:
+        boxes: List of (x, y, w, h) bounding boxes
+        
+    Returns:
+        True if 2-line layout detected, False otherwise
+    """
+    if len(boxes) < 4:
+        return False
+    
+    # Get center Y for each box
+    centers_y = [b[1] + b[3] / 2.0 for b in boxes]
+    centers_y_sorted = sorted(centers_y)
+    
+    # Calculate average character height
+    heights = [b[3] for b in boxes]
+    avg_height = np.mean(heights)
+    
+    # Find the largest gap between consecutive Y centers
+    max_gap = 0
+    for i in range(len(centers_y_sorted) - 1):
+        gap = centers_y_sorted[i + 1] - centers_y_sorted[i]
+        if gap > max_gap:
+            max_gap = gap
+    
+    # If the largest gap is significant (> 30% of character height), it's 2 lines
+    # This threshold works because characters in the same line have small Y variation
+    # while the gap between lines is typically at least half the character height
+    gap_threshold = avg_height * 0.3
+    
+    return max_gap > gap_threshold
+
+
 def _filter_components(mask: np.ndarray, min_area: float, max_area: float, ar_range: Tuple[float, float], min_height_ratio: float = 0.10) -> List[Tuple[int, int, int, int]]:
     """Filter connected components by size, aspect ratio, and height."""
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -164,47 +202,79 @@ def _filter_components(mask: np.ndarray, min_area: float, max_area: float, ar_ra
 def _sort_boxes_2line(boxes: Sequence[Tuple[int, int, int, int]], top_count: int = 3):
     """Sort boxes for 2-line plates: top row first (left-to-right), then bottom row.
     
-    Uses gap-based separation instead of median, which works better when
-    the number of characters differs between rows.
+    Vietnamese 2-line plates typically have:
+    - Top row: 2-3 characters (province code + serial letter, e.g., "30G")
+    - Bottom row: 4-5 characters (numbers, e.g., "51624")
+    
+    Algorithm:
+    1. Find the vertical midpoint of the plate ROI
+    2. Split boxes into top/bottom based on their center Y relative to midpoint
+    3. Sort each row left-to-right by X position
     """
     if not boxes:
         return []
     
-    # Get center Y for each box
-    cy = [(i, b[1] + b[3] / 2.0) for i, b in enumerate(boxes)]
-    cy_sorted = sorted(cy, key=lambda x: x[1])  # sort by Y
+    if len(boxes) < 2:
+        return list(boxes)
     
-    # Find the largest gap in Y positions to separate rows
-    max_gap = 0
-    split_idx = len(cy_sorted) // 2  # default to middle
+    # Calculate the vertical extent of all boxes
+    all_tops = [b[1] for b in boxes]  # y coordinates
+    all_bottoms = [b[1] + b[3] for b in boxes]  # y + h
     
-    for i in range(len(cy_sorted) - 1):
-        gap = cy_sorted[i+1][1] - cy_sorted[i][1]
-        if gap > max_gap:
-            max_gap = gap
-            split_idx = i + 1
+    min_y = min(all_tops)
+    max_y = max(all_bottoms)
     
-    # Need significant gap to split into rows (at least 20% of typical char height)
+    # The midpoint of the plate region
+    mid_y = (min_y + max_y) / 2.0
+    
+    # Also compute average character height for validation
     heights = [b[3] for b in boxes]
-    avg_height = np.mean(heights) if heights else 30
-    min_gap_required = avg_height * 0.3
+    avg_height = np.mean(heights)
     
-    if max_gap < min_gap_required:
-        # No significant gap - treat as single line, sort by X
-        return sorted(boxes, key=lambda b: b[0])
+    # Split into top and bottom rows based on center Y
+    top = []
+    bottom = []
     
-    # Split into top and bottom rows
-    top_indices = set(cy_sorted[i][0] for i in range(split_idx))
-    top = [boxes[i] for i in range(len(boxes)) if i in top_indices]
-    bottom = [boxes[i] for i in range(len(boxes)) if i not in top_indices]
+    for box in boxes:
+        x, y, w, h = box
+        center_y = y + h / 2.0
+        
+        # If center is above midpoint -> top row, else -> bottom row
+        if center_y < mid_y:
+            top.append(box)
+        else:
+            bottom.append(box)
     
-    # Sort each row by X position
+    # Validate the split - if one row is empty, use gap-based fallback
+    if not top or not bottom:
+        # Fallback: find largest Y gap to split
+        cy = [(i, b[1] + b[3] / 2.0) for i, b in enumerate(boxes)]
+        cy_sorted = sorted(cy, key=lambda x: x[1])
+        
+        max_gap = 0
+        split_idx = len(cy_sorted) // 2
+        
+        for i in range(len(cy_sorted) - 1):
+            gap = cy_sorted[i+1][1] - cy_sorted[i][1]
+            if gap > max_gap:
+                max_gap = gap
+                split_idx = i + 1
+        
+        # Check if gap is significant (at least 20% of char height)
+        if max_gap < avg_height * 0.2:
+            # No clear separation - treat as single line
+            return sorted(boxes, key=lambda b: b[0])
+        
+        top_indices = set(cy_sorted[i][0] for i in range(split_idx))
+        top = [boxes[i] for i in range(len(boxes)) if i in top_indices]
+        bottom = [boxes[i] for i in range(len(boxes)) if i not in top_indices]
+    
+    # Sort each row by X position (left to right)
     top = sorted(top, key=lambda b: b[0])
     bottom = sorted(bottom, key=lambda b: b[0])
     
-    # Limit top row to expected count (usually 2-3 chars for Vietnamese plates)
-    if len(top) > top_count:
-        top = top[:top_count]
+    # Vietnamese plates: top row usually has 2-3 chars, bottom has 4-5
+    # Don't artificially limit - trust the segmentation
     
     return top + bottom
 
@@ -337,11 +407,17 @@ def segment_characters(
     debug_info['raw_components'] = len(boxes)
     debug_info['filtered_components'] = len(boxes)
 
+    # Auto-detect if this is a 2-line plate based on Y distribution of boxes
+    # This is more reliable than relying on plate_type parameter
+    is_two_line = _detect_two_line_layout(boxes)
+    
     # Sort by position
-    if expected_rows == 2 and len(boxes) >= 4:
+    if is_two_line and len(boxes) >= 4:
         boxes = _sort_boxes_2line(boxes, top_count=3)
+        debug_info['detected_rows'] = 2
     else:
         boxes = sorted(boxes, key=lambda b: b[0])
+        debug_info['detected_rows'] = 1
 
     # Limit to expected character count
     if len(boxes) > expected_chars[1]:

@@ -42,7 +42,7 @@ PRESETS: Dict[str, DetectorConfig] = {
     # Biển xe hơi vuông 2 dòng (Square car plate - 2 lines)
     # Tỷ lệ W:H khoảng 1:1 đến 1.5:1
     "car_square": DetectorConfig(
-        min_area_ratio=0.008,  # Reduced from 0.015 to catch smaller plates
+        min_area_ratio=0.005,  # Reduced from 0.008 to catch smaller plates
         max_area_ratio=0.30,
         aspect_ratio_range=(0.7, 2.2),  # Wider range for tilted plates
         min_solidity=0.40,  # Reduced from 0.45
@@ -55,7 +55,7 @@ PRESETS: Dict[str, DetectorConfig] = {
     # Biển xe hơi chữ nhật 1 dòng (Rectangular car plate - 1 line)
     # Tỷ lệ W:H khoảng 3:1 đến 5:1
     "car_rect": DetectorConfig(
-        min_area_ratio=0.005,  # Reduced from 0.008
+        min_area_ratio=0.002,  # Reduced to catch very small rectangular plates
         max_area_ratio=0.20,
         aspect_ratio_range=(2.5, 7.0),  # Wider aspect range
         min_solidity=0.35,

@@ -69,22 +69,60 @@ def ocr_plate_easyocr(image: np.ndarray) -> tuple[str, float, list[float]]:
     # --- STEP 2: RUN RECOGNITION ---
     # detail=1 gives bounding boxes
     results = reader.readtext(img_input, detail=1, allowlist=allowlist)
-    
-    full_text = ""
-    confidences = []
-    
-    # Sort results top-to-bottom, then left-to-right
-    def sort_key(res):
-        bbox = res[0]
-        y_center = (bbox[0][1] + bbox[2][1]) / 2
-        x_center = (bbox[0][0] + bbox[1][0]) / 2
-        return (int(y_center // 20), int(x_center))
 
-    results.sort(key=sort_key)
+    def extract_text_and_conf(results_list):
+        full = ""
+        confs = []
+        def sort_key(res):
+            bbox = res[0]
+            y_center = (bbox[0][1] + bbox[2][1]) / 2
+            x_center = (bbox[0][0] + bbox[1][0]) / 2
+            return (int(y_center // 20), int(x_center))
+        results_list.sort(key=sort_key)
+        for (_, text, prob) in results_list:
+            full += text
+            confs.append(prob)
+        return full, confs
 
-    for (_, text, prob) in results:
-        full_text += text
-        confidences.append(prob)
+    full_text, confidences = extract_text_and_conf(results)
+
+    # If no text found, attempt a few fallback preprocessing strategies
+    if not full_text.strip():
+        # Attempt 1: CLAHE on original image
+        try:
+            gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+            clahe_img = clahe.apply(gray)
+            clahe_rgb = cv2.cvtColor(clahe_img, cv2.COLOR_GRAY2RGB)
+            res1 = reader.readtext(clahe_rgb, detail=1, allowlist=allowlist)
+            full_text, confidences = extract_text_and_conf(res1)
+        except Exception:
+            pass
+
+    if not full_text.strip():
+        # Attempt 2: Adaptive threshold + invert
+        try:
+            gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
+            thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                        cv2.THRESH_BINARY_INV, 15, 5)
+            thr_rgb = cv2.cvtColor(thr, cv2.COLOR_GRAY2RGB)
+            res2 = reader.readtext(thr_rgb, detail=1, allowlist=allowlist)
+            full_text, confidences = extract_text_and_conf(res2)
+        except Exception:
+            pass
+
+    if not full_text.strip():
+        # Attempt 3: stronger upscaling (3x) + sharpen
+        try:
+            h2, w2 = enhanced_img.shape[:2]
+            big = cv2.resize(enhanced_img, (int(w2*3), int(h2*3)), interpolation=cv2.INTER_CUBIC)
+            kernel = np.array([[0, -1, 0], [-1, 6, -1], [0, -1, 0]])
+            big = cv2.filter2D(big, -1, kernel)
+            big_rgb = cv2.cvtColor(big, cv2.COLOR_BGR2RGB)
+            res3 = reader.readtext(big_rgb, detail=1, allowlist=allowlist)
+            full_text, confidences = extract_text_and_conf(res3)
+        except Exception:
+            pass
 
     # Clean text
     clean_text = ''.join(c for c in full_text if c.isalnum()).upper()
