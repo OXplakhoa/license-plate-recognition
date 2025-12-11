@@ -1,0 +1,34 @@
+Batch Test Report - 2025-12-11 09:08:32
+======================================================================
+Input: data/test_images/CarTGMT
+Engine: easyocr
+Total: 20, Success: 18, Failed: 2
+Success rate: 90.0%
+
+======================================================================
+SUCCESSFUL DETECTIONS:
+======================================================================
+AEONTP_5026788_checkin_2020-1-13-16-19_f7zXETONv.jpg: 50Z6788 (98.5%)
+AEONTP_51F86947_checkin_2020-1-13-16-15sUVxP1Ihlt.jpg: 57F86947 (83.0%)
+AEONTP_56P6961_checkin_2020-1-13-16-18chzYQvblhX.jpg: 38E18464 (43.2%)
+AEONTP_62A02636_checkin_2020-1-13-16-14gXI_gF3J5Z.jpg: 62A02636 (83.7%)
+AEONTP_6A00530_checkin_2020-1-13-16-16i7h_Z3Ua0Y.jpg: 51A300530 (53.6%)
+AEONTP_6S81U5_checkin_2020-1-13-16-18bx9UOV6rY5.jpg: 53S8195 (75.8%)
+AQUA1_17054_checkin_2020-10-23-10-17jwhBJ7kzC_.jpg: 29I7054 (51.3%)
+AQUA1_25697_checkin_2020-10-23-8-17cJpC9WhKCt.jpg: 46F12549 (62.7%)
+AQUA1_25697_checkin_2020-10-23-8-53U3VaS26nFf.jpg: 30F25697 (93.0%)
+AQUA1_33928_checkin_2020-10-23-8-46Pi5S8mEXah.jpg: 11U11848 (3.7%)
+AQUA1_33928_checkin_2020-10-23-8-51ICUxEIQDLw.jpg: 29I33928 (27.5%)
+AQUA1_43502_checkin_2020-10-23-8-17ifoUU8ftDr.jpg: 80E43502 (87.6%)
+AQUA1_43502_checkin_2020-10-23-8-52NVGEHEXUkc.jpg: 80E43502 (78.3%)
+AQUA1_46294_checkin_2020-10-23-10-18fmUaDsXxvM.jpg: 29I46294 (68.6%)
+AQUA1_46294_checkin_2020-10-23-8-19UnQ54DsL8f.jpg: 29H4629 (39.8%)
+AQUA1_46564_checkin_2020-10-26-8-6Bx7lUNRXBR.jpg: 30F46564 (99.1%)
+AQUA1_49502_checkin_2020-10-23-7-53p0QWmANSgh.jpg: 80E03100 (68.6%)
+AQUA1_60225_checkin_2020-10-26-9-32S7vPENqaNd.jpg: 29G0225 (67.8%)
+
+======================================================================
+FAILED DETECTIONS:
+======================================================================
+AQUA1_40304_checkin_2020-10-25-12-277bdC7U4qUk.jpg: No plate detected
+AQUA1_58236_checkin_2020-10-23-10-27jaFmTKRSGG.jpg: No plate detected
