@@ -345,6 +345,19 @@ class LicensePlateRecognizer:
             if corrected_result is not None and corrected_result.size > 0:
                 corrected = corrected_result
         
+        # Upscale small ROIs for better OCR (especially for rectangular plates)
+        # Tesseract works better with images at least 50-60 pixels tall
+        MIN_HEIGHT_FOR_OCR = 50
+        if corrected.shape[0] < MIN_HEIGHT_FOR_OCR:
+            scale_factor = MIN_HEIGHT_FOR_OCR / corrected.shape[0]
+            # Use INTER_CUBIC for upscaling (better quality than INTER_LINEAR)
+            corrected = cv2.resize(corrected, None, fx=scale_factor, fy=scale_factor, 
+                                   interpolation=cv2.INTER_CUBIC)
+        
+        # Apply CLAHE for better contrast (helps OCR especially on low-contrast plates)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        corrected = clahe.apply(corrected)
+        
         # Stage 3 & 4: Segmentation and OCR
         if self.ocr_engine == "easyocr":
             raw_text, confidence, char_confs = ocr_plate_easyocr(corrected)

@@ -1429,6 +1429,16 @@ def detect_character_candidates(
     if roi_area == 0:
         return [], {"error": "Empty ROI"}
     
+    # Relax parameters for small ROI (rectangular plates with low height)
+    # For ROI with height < 50 pixels, characters may appear wider and take up more height
+    if h < 50:
+        # Wider aspect ratio for small ROIs (characters look wider when compressed)
+        aspect_ratio_range = (0.1, 3.0)  # Allow wider characters
+        # Allow taller characters in small ROIs
+        max_height_ratio = 0.98
+        # Lower min_area_ratio for small ROIs (characters are also small in pixel count)
+        min_area_ratio = 0.002
+    
     # Binarize using Otsu
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
     blurred = cv2.GaussianBlur(clahe, (3, 3), 0)
