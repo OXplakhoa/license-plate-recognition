@@ -38,8 +38,16 @@ from .lp_detector import (
 )
 from .character_segmenter import segment_characters, segment_characters_multi_method, SegmentationResult
 from .ocr_engine import ocr_characters, ocr_plate_line, ocr_plate_multi_psm, OCRResult, configure_tesseract
-from .ocr_easy import ocr_plate_easyocr
 from .heuristics import apply_heuristics, is_valid_plate 
+
+# Conditional import for EasyOCR (may not be installed)
+EASYOCR_AVAILABLE = False
+ocr_plate_easyocr = None
+try:
+    from .ocr_easy import ocr_plate_easyocr
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    pass 
 
 @dataclass
 class PlateResult:
@@ -208,7 +216,7 @@ class LicensePlateRecognizer:
         enhanced = clahe.apply(gray)
         
         # Try OCR
-        if self.ocr_engine == "easyocr":
+        if self.ocr_engine == "easyocr" and EASYOCR_AVAILABLE and ocr_plate_easyocr:
             text, confidence, _ = ocr_plate_easyocr(bgr)  # EasyOCR prefers BGR
         else:
             # Tesseract: try multiple preprocessing approaches
@@ -530,7 +538,7 @@ class LicensePlateRecognizer:
         corrected = clahe.apply(corrected)
         
         # Stage 3 & 4: Segmentation and OCR
-        if self.ocr_engine == "easyocr":
+        if self.ocr_engine == "easyocr" and EASYOCR_AVAILABLE and ocr_plate_easyocr:
             raw_text, confidence, char_confs = ocr_plate_easyocr(corrected)
             seg_chars = None
         else:
