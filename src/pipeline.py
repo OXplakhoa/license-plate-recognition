@@ -181,16 +181,27 @@ class LicensePlateRecognizer:
         """
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            bgr = image
         else:
             gray = image
+            bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         
         h, w = gray.shape[:2]
         
-        # Resize if too small
-        MIN_HEIGHT = 50
-        if h < MIN_HEIGHT:
-            scale = MIN_HEIGHT / h
-            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # Resize for better OCR - Tesseract needs larger images
+        if self.ocr_engine == "tesseract":
+            # Tesseract works better with height around 200-300px
+            target_height = 250
+            if h < target_height:
+                scale = target_height / h
+                gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                bgr = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        else:
+            # EasyOCR doesn't need as much upscaling
+            if h < 50:
+                scale = 50 / h
+                gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+                bgr = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         
         # Apply CLAHE for contrast enhancement
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
@@ -198,9 +209,39 @@ class LicensePlateRecognizer:
         
         # Try OCR
         if self.ocr_engine == "easyocr":
-            text, confidence, _ = ocr_plate_easyocr(enhanced)
+            text, confidence, _ = ocr_plate_easyocr(bgr)  # EasyOCR prefers BGR
         else:
-            text, confidence = ocr_plate_multi_psm(enhanced)
+            # Tesseract: try multiple preprocessing approaches
+            best_text = ""
+            best_conf = 0.0
+            
+            # Method 1: CLAHE enhanced
+            ocr_result = ocr_plate_multi_psm(enhanced)
+            if ocr_result.text and len(ocr_result.text) >= 4:
+                best_text = ocr_result.text
+                best_conf = ocr_result.mean_conf if ocr_result.mean_conf >= 0 else 50.0
+            
+            # Method 2: Otsu binarization if Method 1 failed
+            if len(best_text) < 4:
+                _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                ocr_result2 = ocr_plate_multi_psm(binary)
+                if ocr_result2.text and len(ocr_result2.text) > len(best_text):
+                    best_text = ocr_result2.text
+                    best_conf = ocr_result2.mean_conf if ocr_result2.mean_conf >= 0 else 50.0
+            
+            # Method 3: Adaptive threshold if still not good
+            if len(best_text) < 4:
+                adaptive = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                    cv2.THRESH_BINARY, 11, 2
+                )
+                ocr_result3 = ocr_plate_multi_psm(adaptive)
+                if ocr_result3.text and len(ocr_result3.text) > len(best_text):
+                    best_text = ocr_result3.text
+                    best_conf = ocr_result3.mean_conf if ocr_result3.mean_conf >= 0 else 50.0
+            
+            text = best_text
+            confidence = best_conf
         
         # Apply heuristics
         if text:
@@ -212,8 +253,9 @@ class LicensePlateRecognizer:
             'confidence': confidence
         }
         
-        # Validate result
-        if text and len(text) >= 5 and confidence > 30:
+        # Validate result - lower threshold for Tesseract since confidence may be unreliable
+        min_confidence = 20 if self.ocr_engine == "tesseract" else 30
+        if text and len(text) >= 5 and confidence >= min_confidence:
             aspect_ratio = w / h
             plate_type = get_plate_type_from_aspect(aspect_ratio)
             
