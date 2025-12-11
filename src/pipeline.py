@@ -124,6 +124,110 @@ class LicensePlateRecognizer:
         if self.ocr_engine == "tesseract":
             configure_tesseract()
     
+    def _is_plate_like_image(self, image: np.ndarray) -> bool:
+        """
+        Check if the input image looks like a cropped license plate.
+        
+        This detects cases where user uploads a pre-cropped plate image
+        instead of a full car photo. In such cases, we should try direct
+        OCR instead of running detection.
+        
+        Criteria:
+        - Aspect ratio matches plate types (0.7-7.0)
+        - Image is relatively small (not a full car photo)
+        - Has high text density (many edge pixels)
+        """
+        h, w = image.shape[:2]
+        if h == 0 or w == 0:
+            return False
+            
+        aspect_ratio = w / h
+        
+        # Check aspect ratio matches plate types
+        # Square plate: 0.7-2.2, Rectangular: 2.5-7.0, Bike: 1.0-3.2
+        if not (0.5 <= aspect_ratio <= 8.0):
+            return False
+        
+        # If image is large, it's probably a full photo, not a cropped plate
+        # Typical cropped plates are small (height < 300px usually)
+        # A full car photo is typically > 400px in both dimensions
+        total_pixels = w * h
+        if total_pixels > 200000:  # > ~450x450 
+            return False
+        
+        # Very small images are also not plates (icons, thumbnails)
+        if h < 30 or w < 50:
+            return False
+        
+        # Check for text-like content using edge density
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        # Apply edge detection
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.count_nonzero(edges) / (w * h)
+        
+        # Plate images typically have edge density between 5-40%
+        # Full car photos have much lower edge density in general
+        return 0.03 <= edge_density <= 0.50
+    
+    def _try_direct_ocr(self, image: np.ndarray, debug_info: dict) -> Optional[PlateResult]:
+        """
+        Try OCR directly on the input image (assuming it's a cropped plate).
+        
+        This is used when the input image appears to be a pre-cropped plate.
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        h, w = gray.shape[:2]
+        
+        # Resize if too small
+        MIN_HEIGHT = 50
+        if h < MIN_HEIGHT:
+            scale = MIN_HEIGHT / h
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        
+        # Apply CLAHE for contrast enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        # Try OCR
+        if self.ocr_engine == "easyocr":
+            text, confidence, _ = ocr_plate_easyocr(enhanced)
+        else:
+            text, confidence = ocr_plate_multi_psm(enhanced)
+        
+        # Apply heuristics
+        if text:
+            text = apply_heuristics(text)
+        
+        debug_info['direct_ocr'] = {
+            'attempted': True,
+            'raw_text': text,
+            'confidence': confidence
+        }
+        
+        # Validate result
+        if text and len(text) >= 5 and confidence > 30:
+            aspect_ratio = w / h
+            plate_type = get_plate_type_from_aspect(aspect_ratio)
+            
+            return PlateResult(
+                text=text,
+                confidence=confidence,
+                box=(0, 0, w, h),
+                plate_type=plate_type,
+                detection_method="direct_ocr",
+                corrected_image=enhanced,
+            )
+        
+        return None
+    
     def _detect_with_retry(
         self, 
         gray: np.ndarray, 
@@ -241,6 +345,24 @@ class LicensePlateRecognizer:
         debug_info = {}
         plates: List[PlateResult] = []
         
+        # Check if image looks like a pre-cropped plate
+        # If so, try direct OCR first before running detection
+        is_plate_like = self._is_plate_like_image(image)
+        debug_info['is_plate_like'] = is_plate_like
+        
+        if is_plate_like:
+            # Try direct OCR on the input image
+            direct_result = self._try_direct_ocr(image, debug_info)
+            if direct_result and direct_result.confidence > 50:
+                plates.append(direct_result)
+                # Return early if we got a good result
+                processing_time = (time.time() - start_time) * 1000
+                return PipelineResult(
+                    plates=plates,
+                    processing_time_ms=processing_time,
+                    debug_info=debug_info,
+                )
+        
         # Stage 1: Detection with optional auto-retry
         detections = self._detect_with_retry(gray, bgr, debug_info)
         
@@ -275,6 +397,13 @@ class LicensePlateRecognizer:
                     plate_result = self._process_detection(gray, bgr, det)
                     if plate_result and plate_result.text:
                         plates.append(plate_result)
+        
+        # Final fallback: if still no plates and image looks like a plate, try direct OCR
+        if not plates and is_plate_like:
+            direct_result = self._try_direct_ocr(image, debug_info)
+            if direct_result:
+                plates.append(direct_result)
+                debug_info['fallback_direct_ocr'] = True
         
         # Sort by confidence
         plates.sort(key=lambda p: p.confidence, reverse=True)

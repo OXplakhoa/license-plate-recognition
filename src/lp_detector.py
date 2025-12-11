@@ -1540,6 +1540,8 @@ def compute_character_score(
     consistent sizing and spacing. This function scores how likely
     the ROI contains a valid plate based on detected characters.
     
+    Supports both single-line and two-line (square) Vietnamese plates.
+    
     Args:
         roi_image: Grayscale or BGR image of the plate region
         expected_chars_range: Expected number of characters (min, max)
@@ -1563,25 +1565,81 @@ def compute_character_score(
     if len(chars) == 0:
         return 0.0, {"chars": 0, "reason": "no_characters"}
     
+    # Check if this might be a two-line plate (square plate)
+    # by analyzing the vertical distribution of characters
+    gray = ensure_grayscale(roi_image)
+    roi_h, roi_w = gray.shape[:2]
+    aspect_ratio = roi_w / roi_h if roi_h > 0 else 0
+    
+    # Two-line plate detection: AR close to 1 and characters in 2 distinct rows
+    is_two_line = False
+    line1_chars = []
+    line2_chars = []
+    
+    if 0.5 < aspect_ratio < 2.0 and len(chars) >= 3:
+        # Check if characters form 2 distinct horizontal lines
+        y_centers = sorted([y + h/2 for (_, y, _, h) in chars])
+        
+        if len(y_centers) >= 3:
+            # Find the largest gap in y-centers
+            gaps = [(y_centers[i+1] - y_centers[i], i) for i in range(len(y_centers)-1)]
+            if gaps:
+                max_gap, gap_idx = max(gaps, key=lambda x: x[0])
+                
+                # If max gap is significant (> 20% of ROI height), it's likely 2 lines
+                if max_gap > roi_h * 0.15:
+                    is_two_line = True
+                    threshold_y = (y_centers[gap_idx] + y_centers[gap_idx + 1]) / 2
+                    
+                    for (x, y, w, h) in chars:
+                        center_y = y + h/2
+                        if center_y < threshold_y:
+                            line1_chars.append((x, y, w, h))
+                        else:
+                            line2_chars.append((x, y, w, h))
+    
     # Score 1: Character count (prefer 6-8 chars for VN plates)
-    # VN plates typically have 7-9 chars (e.g., 51F-86947)
+    # VN plates typically have 7-9 chars (e.g., 51F-86947 or 76A\n222.22)
     min_chars, max_chars = expected_chars_range
     char_count_score = 0.0
     ideal_chars = 7  # Ideal for VN plates
-    if min_chars <= len(chars) <= max_chars:
-        # Give bonus for being close to ideal
-        distance_from_ideal = abs(len(chars) - ideal_chars)
-        char_count_score = max(0.7, 1.0 - distance_from_ideal * 0.1)
-    elif len(chars) < min_chars:
-        char_count_score = len(chars) / min_chars * 0.5  # Penalize more
+    
+    if is_two_line:
+        # For two-line plates, expect 3-4 chars on line 1, 4-6 chars on line 2
+        total_chars = len(chars)
+        if 6 <= total_chars <= 10:
+            # Good count for 2-line plate
+            if len(line1_chars) >= 2 and len(line2_chars) >= 3:
+                char_count_score = 0.95  # High score for valid 2-line structure
+            else:
+                char_count_score = 0.8
+        elif total_chars >= min_chars:
+            char_count_score = 0.7
+        else:
+            char_count_score = total_chars / min_chars * 0.5
     else:
-        char_count_score = max(0, 1.0 - (len(chars) - max_chars) / max_chars * 0.5)
+        if min_chars <= len(chars) <= max_chars:
+            # Give bonus for being close to ideal
+            distance_from_ideal = abs(len(chars) - ideal_chars)
+            char_count_score = max(0.7, 1.0 - distance_from_ideal * 0.1)
+        elif len(chars) < min_chars:
+            char_count_score = len(chars) / min_chars * 0.5  # Penalize more
+        else:
+            char_count_score = max(0, 1.0 - (len(chars) - max_chars) / max_chars * 0.5)
     
     # Score 2: Size consistency (characters should be similar size)
     heights = [h for (_, _, _, h) in chars]
     widths = [w for (_, _, w, _) in chars]
     
-    if len(heights) > 1:
+    if is_two_line and len(line1_chars) > 0 and len(line2_chars) > 0:
+        # For 2-line plates, check consistency within each line
+        heights1 = [h for (_, _, _, h) in line1_chars]
+        heights2 = [h for (_, _, _, h) in line2_chars]
+        
+        std1 = np.std(heights1) / np.mean(heights1) if len(heights1) > 1 and np.mean(heights1) > 0 else 0
+        std2 = np.std(heights2) / np.mean(heights2) if len(heights2) > 1 and np.mean(heights2) > 0 else 0
+        size_score = max(0, 1.0 - (std1 + std2) / 2)
+    elif len(heights) > 1:
         height_std = np.std(heights) / np.mean(heights) if np.mean(heights) > 0 else 1
         width_std = np.std(widths) / np.mean(widths) if np.mean(widths) > 0 else 1
         size_score = max(0, 1.0 - (height_std + width_std) / 2)
@@ -1589,32 +1647,63 @@ def compute_character_score(
         size_score = 0.5  # Single character - neutral score
     
     # Score 3: Spacing regularity (gaps between characters should be regular)
-    chars_sorted = sorted(chars, key=lambda c: c[0])
-    if len(chars_sorted) > 2:
-        gaps = []
-        for i in range(len(chars_sorted) - 1):
-            x1, _, w1, _ = chars_sorted[i]
-            x2, _, _, _ = chars_sorted[i + 1]
-            gap = x2 - (x1 + w1)
-            if gap > 0:
-                gaps.append(gap)
-        
-        if gaps:
-            gap_std = np.std(gaps) / np.mean(gaps) if np.mean(gaps) > 0 else 1
-            spacing_score = max(0, 1.0 - gap_std)
-        else:
-            spacing_score = 0.3
+    if is_two_line:
+        # For 2-line plates, check spacing within each line
+        spacing_scores = []
+        for line_chars in [line1_chars, line2_chars]:
+            if len(line_chars) > 2:
+                chars_sorted = sorted(line_chars, key=lambda c: c[0])
+                gaps = []
+                for i in range(len(chars_sorted) - 1):
+                    x1, _, w1, _ = chars_sorted[i]
+                    x2, _, _, _ = chars_sorted[i + 1]
+                    gap = x2 - (x1 + w1)
+                    if gap > 0:
+                        gaps.append(gap)
+                if gaps:
+                    gap_std = np.std(gaps) / np.mean(gaps) if np.mean(gaps) > 0 else 1
+                    spacing_scores.append(max(0, 1.0 - gap_std))
+        spacing_score = np.mean(spacing_scores) if spacing_scores else 0.5
     else:
-        spacing_score = 0.5
+        chars_sorted = sorted(chars, key=lambda c: c[0])
+        if len(chars_sorted) > 2:
+            gaps = []
+            for i in range(len(chars_sorted) - 1):
+                x1, _, w1, _ = chars_sorted[i]
+                x2, _, _, _ = chars_sorted[i + 1]
+                gap = x2 - (x1 + w1)
+                if gap > 0:
+                    gaps.append(gap)
+        
+            if gaps:
+                gap_std = np.std(gaps) / np.mean(gaps) if np.mean(gaps) > 0 else 1
+                spacing_score = max(0, 1.0 - gap_std)
+            else:
+                spacing_score = 0.3
+        else:
+            spacing_score = 0.5
     
     # Score 4: Vertical alignment (characters should be roughly aligned)
-    if len(chars) > 1:
-        y_centers = [y + h/2 for (_, y, _, h) in chars]
-        y_std = np.std(y_centers)
-        avg_height = np.mean(heights)
-        alignment_score = max(0, 1.0 - y_std / avg_height) if avg_height > 0 else 0
+    if is_two_line:
+        # For 2-line plates, check alignment within each line separately
+        alignment_scores = []
+        for line_chars in [line1_chars, line2_chars]:
+            if len(line_chars) > 1:
+                line_heights = [h for (_, _, _, h) in line_chars]
+                y_centers = [y + h/2 for (_, y, _, h) in line_chars]
+                y_std = np.std(y_centers)
+                avg_height = np.mean(line_heights)
+                if avg_height > 0:
+                    alignment_scores.append(max(0, 1.0 - y_std / avg_height))
+        alignment_score = np.mean(alignment_scores) if alignment_scores else 0.5
     else:
-        alignment_score = 0.5
+        if len(chars) > 1:
+            y_centers = [y + h/2 for (_, y, _, h) in chars]
+            y_std = np.std(y_centers)
+            avg_height = np.mean(heights)
+            alignment_score = max(0, 1.0 - y_std / avg_height) if avg_height > 0 else 0
+        else:
+            alignment_score = 0.5
     
     # Compute weighted total
     total_score = (
@@ -1624,9 +1713,16 @@ def compute_character_score(
         weights["alignment"] * alignment_score
     )
     
+    # Bonus for valid 2-line structure
+    if is_two_line and len(line1_chars) >= 2 and len(line2_chars) >= 3:
+        total_score = min(1.0, total_score * 1.1)  # 10% bonus
+    
     details = {
         "char_count": len(chars),
         "char_boxes": chars,
+        "is_two_line": is_two_line,
+        "line1_count": len(line1_chars) if is_two_line else 0,
+        "line2_count": len(line2_chars) if is_two_line else 0,
         "scores": {
             "char_count": char_count_score,
             "size_consistency": size_score,
