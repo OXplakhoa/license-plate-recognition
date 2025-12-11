@@ -138,6 +138,47 @@ def visualize_preprocessing_steps(image: np.ndarray):
     steps['candidate_count'] = len(plate_candidates)
     steps['plate_candidates'] = plate_candidates
     
+    # Bước 8: Character Validation - Đánh giá từng candidate
+    # Đây là bước quan trọng để loại bỏ false positives
+    from src.lp_detector import compute_character_score
+    
+    scored_candidates = []
+    for i, (x, y, w, h, ar) in enumerate(plate_candidates):
+        roi = gray[y:y+h, x:x+w]
+        if roi.size > 0:
+            score, details = compute_character_score(roi)
+            char_count = details.get('char_count', 0)
+            scored_candidates.append({
+                'index': i + 1,
+                'box': (x, y, w, h),
+                'aspect_ratio': ar,
+                'char_score': score,
+                'char_count': char_count,
+                'is_valid': score >= 0.35  # Ngưỡng mặc định
+            })
+    
+    # Sắp xếp theo điểm cao nhất
+    scored_candidates.sort(key=lambda c: c['char_score'], reverse=True)
+    
+    # Vẽ ảnh với điểm character score
+    scored_img = image.copy()
+    for cand in scored_candidates:
+        x, y, w, h = cand['box']
+        score = cand['char_score']
+        is_valid = cand['is_valid']
+        
+        # Màu xanh nếu valid, đỏ nếu không
+        color = (0, 255, 0) if is_valid else (0, 0, 255)
+        cv2.rectangle(scored_img, (x, y), (x+w, y+h), color, 2)
+        
+        # Hiển thị score
+        label = f"S:{score:.2f}"
+        cv2.putText(scored_img, label, (x, y-5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    
+    steps['scored_candidates'] = scored_img
+    steps['scored_list'] = scored_candidates
+    
     return steps
 
 
@@ -293,6 +334,55 @@ def display_preprocessing_steps(steps: dict):
         with st.expander("📊 Chi tiết các vùng candidate"):
             for i, (x, y, w, h, ar) in enumerate(steps['plate_candidates'][:5]):
                 st.write(f"**Candidate {i+1}:** Vị trí ({x}, {y}), Kích thước {w}x{h}, Aspect Ratio: {ar:.2f}")
+    
+    # Bước 8: Character Validation - QUAN TRỌNG
+    st.markdown("**Bước 8: Character Validation (Xác thực ký tự) ⭐**")
+    st.caption("🔑 **Bước quan trọng nhất!** Đánh giá xem mỗi candidate có chứa ký tự giống biển số không")
+    
+    if 'scored_candidates' in steps:
+        scored_rgb = cv2.cvtColor(steps['scored_candidates'], cv2.COLOR_BGR2RGB)
+        
+        # Đếm valid candidates
+        valid_count = sum(1 for c in steps['scored_list'] if c['is_valid'])
+        st.image(scored_rgb, caption=f"🟢 Hợp lệ: {valid_count} | 🔴 Không hợp lệ: {len(steps['scored_list']) - valid_count}", use_container_width=True)
+        
+        # Giải thích
+        st.info("""
+        **Cách hoạt động:**
+        - Mỗi candidate được phân tích để tìm các vùng giống ký tự (contours có tỉ lệ phù hợp)
+        - **Character Score** được tính dựa trên: số lượng ký tự, độ đều, vị trí, kích thước
+        - Ngưỡng mặc định: **Score ≥ 0.35** → Hợp lệ (màu xanh)
+        - Candidate có score cao nhất sẽ được chọn làm biển số
+        """)
+        
+        # Bảng chi tiết
+        with st.expander("📊 Chi tiết điểm từng candidate", expanded=True):
+            # Header
+            cols = st.columns([1, 2, 2, 2, 2])
+            cols[0].markdown("**#**")
+            cols[1].markdown("**Kích thước**")
+            cols[2].markdown("**Aspect Ratio**")
+            cols[3].markdown("**Char Score**")
+            cols[4].markdown("**Kết quả**")
+            
+            st.divider()
+            
+            # Rows - hiển thị top 5
+            for cand in steps['scored_list'][:5]:
+                cols = st.columns([1, 2, 2, 2, 2])
+                x, y, w, h = cand['box']
+                cols[0].write(f"{cand['index']}")
+                cols[1].write(f"{w}×{h}")
+                cols[2].write(f"{cand['aspect_ratio']:.2f}")
+                
+                # Score với màu
+                score = cand['char_score']
+                if cand['is_valid']:
+                    cols[3].markdown(f"**:green[{score:.3f}]**")
+                    cols[4].markdown("✅ **Hợp lệ**")
+                else:
+                    cols[3].markdown(f":red[{score:.3f}]")
+                    cols[4].markdown("❌ Loại bỏ")
 
 
 def display_plate_processing_steps(plate_steps: dict, plate_index: int = 1):
