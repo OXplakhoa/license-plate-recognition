@@ -255,25 +255,30 @@ def visualize_plate_processing(plate_roi: np.ndarray):
     steps['char_boxes'] = char_contours
     
     # Trích xuất và resize từng ký tự thành 28x28
+    # Sử dụng format MNIST: chữ TRẮNG trên nền ĐEN
     char_images_28x28 = []
+    
+    # Đảo ngược ảnh binary: chữ đen/nền trắng → chữ trắng/nền đen
+    inverted = cv2.bitwise_not(cleaned)
+    
     for x, y, w, h in char_contours:
-        # Cắt ký tự từ ảnh đã làm sạch
-        char_img = cleaned[y:y+h, x:x+w]
+        # Cắt ký tự từ ảnh đã đảo ngược (chữ trắng trên nền đen)
+        char_img = inverted[y:y+h, x:x+w]
         
         # Padding để giữ tỉ lệ trước khi resize
-        # Tìm kích thước lớn hơn
-        max_dim = max(h, w)
+        # Thêm 4 pixel padding như script visualization
+        side = max(h, w) + 4
         
-        # Tạo ảnh vuông với nền trắng (255)
-        square_img = np.ones((max_dim, max_dim), dtype=np.uint8) * 255
+        # Tạo ảnh vuông với nền ĐEN (0) - giống MNIST format
+        canvas = np.zeros((side, side), dtype=np.uint8)
         
         # Đặt ký tự vào giữa
-        y_offset = (max_dim - h) // 2
-        x_offset = (max_dim - w) // 2
-        square_img[y_offset:y_offset+h, x_offset:x_offset+w] = char_img
+        y_offset = (side - h) // 2
+        x_offset = (side - w) // 2
+        canvas[y_offset:y_offset+h, x_offset:x_offset+w] = char_img
         
         # Resize về 28x28
-        char_28x28 = cv2.resize(square_img, (28, 28), interpolation=cv2.INTER_AREA)
+        char_28x28 = cv2.resize(canvas, (28, 28), interpolation=cv2.INTER_AREA)
         char_images_28x28.append(char_28x28)
     
     steps['char_images_28x28'] = char_images_28x28
@@ -894,11 +899,14 @@ def main():
         
         # Phần ảnh mẫu
         st.subheader("📁 Ảnh mẫu")
-        st.markdown("Bạn có thể test với các ảnh từ thư mục `data/test_images/`:")
+        st.markdown("Bạn có thể test với các ảnh mẫu bên dưới hoặc tải ảnh của bạn lên:")
         
-        sample_folder = Path("data/test_images/CarTGMT")
+        sample_folder = Path("data/samples")
+        if not sample_folder.exists():
+            sample_folder = Path("data/test_images/CarTGMT")
+        
         if sample_folder.exists():
-            sample_images = list(sample_folder.glob("*.jpg"))[:5]
+            sample_images = sorted(sample_folder.glob("*.jpg"))[:5]
             
             if sample_images:
                 cols = st.columns(5)
